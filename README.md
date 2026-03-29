@@ -180,15 +180,6 @@ Supported audio input is browser-dependent because decoding uses `AudioContext.d
 
 The screenshots below were captured from a real local run of the app. The loaded-state and walkthrough capture use a local `Skyfall.mp3` upload so the visuals reflect the actual audio + lyric pipeline rather than a mocked frame.
 
-### Idle state
-
-![Idle visualizer UI](docs/screenshots/idle-state.png)
-
-### Loaded state
-
-![Loaded visualizer UI](docs/screenshots/loaded-state.png)
-
-![Loaded visualizer UI](docs/screenshots/loaded-state.png)
 
 ## Walkthrough
 
