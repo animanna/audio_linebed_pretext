@@ -2,6 +2,12 @@
 
 Animated music visualization with synced lyrics, built around `@chenglou/pretext` for text measurement and manual line layout.
 
+[![Live App](https://img.shields.io/badge/Live%20App-Netlify-00C7B7?style=for-the-badge&logo=netlify&logoColor=white)](https://audiovisualizaionpretext.netlify.app/)
+
+> Live demo: [audiovisualizaionpretext.netlify.app](https://audiovisualizaionpretext.netlify.app/)
+>
+> The public build loads `Skyfall` by default with synced lyrics, play/pause controls, and a seek bar.
+
 ![Pretext hero image](docs/screenshots/pretext_hero.png)
 
 ## What This Project Does
