@@ -2,7 +2,7 @@
 
 Animated music visualization with synced lyrics, built around `@chenglou/pretext` for text measurement and manual line layout.
 
-![Loaded visualizer UI](docs/screenshots/loaded-state.png)
+![Pretext hero image](docs/screenshots/pretext_hero.png)
 
 ## What This Project Does
 
@@ -188,9 +188,7 @@ The screenshots below were captured from a real local run of the app. The loaded
 
 ![Loaded visualizer UI](docs/screenshots/loaded-state.png)
 
-### Hero image
-
-![Pretext hero image](docs/screenshots/pretext_hero.png)
+![Loaded visualizer UI](docs/screenshots/loaded-state.png)
 
 ## Walkthrough
 
