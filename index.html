@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Music Visualizer</title>
+  <title>Skyfall Visualizer</title>
   <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&display=swap');
 
@@ -31,50 +31,111 @@
 
     .controls {
       position: fixed;
-      bottom: 32px;
+      bottom: 28px;
       z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      width: 100%;
+      padding: 0 16px;
+    }
+
+    .transport-shell {
+      min-width: min(420px, calc(100vw - 32px));
+      padding: 18px 20px 20px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 20px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+        rgba(9, 9, 14, 0.72);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(18px);
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 14px;
+      gap: 10px;
     }
 
     .controls .row {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
+      width: 100%;
+      justify-content: center;
     }
 
-    .drop-zone {
-      border: 2px dashed rgba(255, 255, 255, 0.2);
-      border-radius: 16px;
-      padding: 20px 40px;
-      text-align: center;
+    .time-row {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: 'Space Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      opacity: 0.58;
+    }
+
+    .seek-bar {
+      --seek-progress: 0%;
+      width: 100%;
+      -webkit-appearance: none;
+      appearance: none;
+      height: 6px;
+      border-radius: 999px;
+      background:
+        linear-gradient(90deg,
+          rgba(255, 255, 255, 0.92) 0%,
+          rgba(255, 167, 62, 0.88) var(--seek-progress),
+          rgba(255, 255, 255, 0.14) var(--seek-progress),
+          rgba(255, 255, 255, 0.14) 100%);
+      outline: none;
       cursor: pointer;
-      transition: all 0.3s ease;
-      background: rgba(255, 255, 255, 0.03);
-      backdrop-filter: blur(10px);
     }
 
-    .drop-zone:hover, .drop-zone.dragover {
-      border-color: rgba(255, 255, 255, 0.5);
-      background: rgba(255, 255, 255, 0.08);
+    .seek-bar:disabled {
+      opacity: 0.35;
+      cursor: not-allowed;
     }
 
-    .drop-zone p {
-      font-size: 14px;
-      opacity: 0.6;
-      font-weight: 300;
+    .seek-bar::-webkit-slider-runnable-track {
+      height: 6px;
+      border-radius: 999px;
+      background: transparent;
     }
 
-    .drop-zone .title {
-      font-size: 16px;
-      opacity: 1;
-      font-weight: 600;
-      margin-bottom: 4px;
+    .seek-bar::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      margin-top: -5px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.14);
     }
 
-    #file-input, #lyrics-file-input { display: none; }
+    .seek-bar::-moz-range-track {
+      height: 6px;
+      border-radius: 999px;
+      border: 0;
+      background: rgba(255, 255, 255, 0.14);
+    }
+
+    .seek-bar::-moz-range-progress {
+      height: 6px;
+      border-radius: 999px;
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.92), rgba(255, 167, 62, 0.88));
+    }
+
+    .seek-bar::-moz-range-thumb {
+      width: 16px;
+      height: 16px;
+      border: 0;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.14);
+    }
 
     button {
       background: rgba(255, 255, 255, 0.1);
@@ -87,6 +148,7 @@
       cursor: pointer;
       backdrop-filter: blur(10px);
       transition: all 0.2s ease;
+      min-width: 128px;
     }
 
     button:hover {
@@ -99,107 +161,41 @@
       cursor: not-allowed;
     }
 
-    button.small {
-      padding: 6px 16px;
-      font-size: 12px;
-      border-radius: 8px;
-    }
-
     .now-playing {
-      font-size: 13px;
-      opacity: 0.5;
-      font-weight: 300;
-      letter-spacing: 0.5px;
+      font-size: 20px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-align: center;
     }
 
     .lyrics-status {
       font-size: 11px;
-      opacity: 0.35;
+      opacity: 0.42;
       font-weight: 300;
       font-family: 'Space Mono', monospace;
       letter-spacing: 0.3px;
+      min-height: 1em;
+      text-align: center;
     }
 
-    .seek-bar {
-      width: 300px;
-      -webkit-appearance: none;
-      appearance: none;
-      height: 4px;
-      background: rgba(255, 255, 255, 0.15);
-      border-radius: 2px;
-      outline: none;
-      cursor: pointer;
-    }
+    @media (max-width: 640px) {
+      .transport-shell {
+        min-width: calc(100vw - 24px);
+        padding: 16px;
+      }
 
-    .seek-bar::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: #fff;
-      cursor: pointer;
-    }
+      .controls .row {
+        gap: 8px;
+      }
 
-    /* Lyrics paste modal */
-    .modal-overlay {
-      display: none;
-      position: fixed;
-      inset: 0;
-      background: rgba(0, 0, 0, 0.7);
-      backdrop-filter: blur(8px);
-      z-index: 100;
-      justify-content: center;
-      align-items: center;
-    }
+      button {
+        flex: 1;
+        min-width: 0;
+      }
 
-    .modal-overlay.open { display: flex; }
-
-    .modal {
-      background: rgba(20, 20, 30, 0.95);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 16px;
-      padding: 28px;
-      width: 480px;
-      max-height: 70vh;
-      display: flex;
-      flex-direction: column;
-      gap: 14px;
-    }
-
-    .modal h3 {
-      font-size: 16px;
-      font-weight: 600;
-    }
-
-    .modal p {
-      font-size: 12px;
-      opacity: 0.5;
-      font-weight: 300;
-      line-height: 1.5;
-    }
-
-    .modal textarea {
-      width: 100%;
-      height: 200px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
-      color: #fff;
-      font-family: 'Space Mono', monospace;
-      font-size: 12px;
-      padding: 14px;
-      resize: vertical;
-      outline: none;
-    }
-
-    .modal textarea:focus {
-      border-color: rgba(255, 255, 255, 0.3);
-    }
-
-    .modal .row {
-      display: flex;
-      gap: 10px;
-      justify-content: flex-end;
+      .now-playing {
+        font-size: 18px;
+      }
     }
   </style>
 </head>
@@ -207,45 +203,27 @@
   <canvas id="viz-canvas"></canvas>
 
   <div class="controls">
-    <div class="drop-zone" id="drop-zone">
-      <p class="title">Drop audio + lyrics files here</p>
-      <p>.mp3/.wav/.ogg/.flac + optional .lrc/.txt lyrics</p>
-    </div>
-    <input type="file" id="file-input" accept="audio/*" />
-    <input type="file" id="lyrics-file-input" accept=".lrc,.txt" />
-    <span class="now-playing" id="now-playing"></span>
-    <span class="lyrics-status" id="lyrics-status"></span>
-    <input type="range" class="seek-bar" id="seek-bar" min="0" max="100" value="0" step="0.1" />
-    <div class="row">
-      <button id="btn-play" disabled>Play</button>
-      <button id="btn-pause" disabled>Pause</button>
-      <button id="btn-lyrics" class="small">Load Lyrics</button>
-      <button id="btn-paste-lyrics" class="small">Paste Lyrics</button>
-    </div>
-  </div>
-
-  <!-- Lyrics paste modal -->
-  <div class="modal-overlay" id="lyrics-modal">
-    <div class="modal">
-      <h3>Paste Lyrics</h3>
-      <p>
-        Paste timed LRC lyrics or plain text (one line per line).<br>
-        LRC format: [00:12.34] Lyric line here<br>
-        Plain text lines get evenly distributed across the song duration.<br>
-        Wrap a line with *asterisks* to mark it as emphasis.
-      </p>
-      <textarea id="lyrics-textarea" placeholder="[00:05.00] First line of the song
-[00:10.50] Second line with timing
-[00:15.00] *Emphasized chorus line*
-
-— or just paste plain text —
-
-First line
-Second line
-*Chorus line*"></textarea>
+    <div class="transport-shell">
+      <span class="now-playing" id="now-playing"></span>
+      <span class="lyrics-status" id="lyrics-status" aria-live="polite"></span>
+      <input
+        type="range"
+        id="seek-bar"
+        class="seek-bar"
+        min="0"
+        max="1000"
+        value="0"
+        step="1"
+        disabled
+        aria-label="Audio progress"
+      />
+      <div class="time-row" aria-hidden="true">
+        <span id="current-time">0:00</span>
+        <span id="duration">0:00</span>
+      </div>
       <div class="row">
-        <button id="btn-modal-cancel" class="small">Cancel</button>
-        <button id="btn-modal-apply">Apply Lyrics</button>
+        <button id="btn-play" disabled>Play</button>
+        <button id="btn-pause" disabled>Pause</button>
       </div>
     </div>
   </div>

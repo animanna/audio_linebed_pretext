@@ -8,21 +8,29 @@ import {
 } from '@chenglou/pretext'
 import { AudioEngine } from './audio.js'
 import { BeatDetector } from './beat-detect.js'
-import { demoLyrics, getCurrentLyric, getLyricProgress } from './lyrics.js'
-import { parseLyricsFile, parsePlainLyrics } from './lrc-parser.js'
-import { readID3Tags } from './id3-reader.js'
+import { getCurrentLyric, getLyricProgress } from './lyrics.js'
+import { parseLyricsFile } from './lrc-parser.js'
 import { fetchLyrics } from './lyrics-fetch.js'
 
 // ── State ──────────────────────────────────────────────────────────────
+const APP_BASE_URL = import.meta.env.BASE_URL || '/'
+const DEFAULT_TRACK = {
+  title: 'Skyfall',
+  artist: 'Adele',
+  fileName: 'skyfall.mp3',
+  // Keep this same-origin by default so the deployed app serves the audio itself.
+  // If you switch to a CDN URL later, it must allow cross-origin fetches.
+  audioUrl: `${APP_BASE_URL}skyfall.mp3`,
+  lyricsUrl: '',
+}
+
 const EMPTY_LYRICS = [{ time: 0, text: '', emphasis: false }]
 const audio = new AudioEngine()
 const beat = new BeatDetector()
-let lyrics = demoLyrics
-let lyricsSource = 'demo' // 'demo' | 'embedded' | 'fetched' | 'lrc' | 'plain' | 'pasted'
+let lyrics = EMPTY_LYRICS
 let animFrame = null
 let lastTimestamp = 0
 let activeTrackId = 0
-let pendingLyricsInput = null
 let currentPretextLocale = undefined
 
 // Canvas setup
@@ -38,28 +46,48 @@ resize()
 window.addEventListener('resize', resize)
 
 // ── UI wiring ──────────────────────────────────────────────────────────
-const dropZone = document.getElementById('drop-zone')
-const fileInput = document.getElementById('file-input')
-const lyricsFileInput = document.getElementById('lyrics-file-input')
 const btnPlay = document.getElementById('btn-play')
 const btnPause = document.getElementById('btn-pause')
-const btnLyrics = document.getElementById('btn-lyrics')
-const btnPasteLyrics = document.getElementById('btn-paste-lyrics')
 const nowPlaying = document.getElementById('now-playing')
 const lyricsStatus = document.getElementById('lyrics-status')
 const seekBar = document.getElementById('seek-bar')
-const lyricsModal = document.getElementById('lyrics-modal')
-const lyricsTextarea = document.getElementById('lyrics-textarea')
-const btnModalCancel = document.getElementById('btn-modal-cancel')
-const btnModalApply = document.getElementById('btn-modal-apply')
+const currentTimeLabel = document.getElementById('current-time')
+const durationLabel = document.getElementById('duration')
 
 function updateLyricsStatus(msg) {
   lyricsStatus.textContent = msg
 }
 
-function isLyricsFile(name) {
-  const lower = name.toLowerCase()
-  return lower.endsWith('.lrc') || lower.endsWith('.txt')
+function formatTime(seconds) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '0:00'
+  const totalSeconds = Math.max(0, Math.floor(seconds))
+  const minutes = Math.floor(totalSeconds / 60)
+  const remainder = totalSeconds % 60
+  return `${minutes}:${String(remainder).padStart(2, '0')}`
+}
+
+function updateSeekBarProgress(percent) {
+  const clamped = Math.max(0, Math.min(100, percent))
+  seekBar.style.setProperty('--seek-progress', `${clamped}%`)
+}
+
+function syncProgressUI() {
+  const duration = audio.duration || 0
+  const currentTime = audio.currentTime || 0
+  const progress = duration > 0 ? (currentTime / duration) * 100 : 0
+
+  seekBar.disabled = duration <= 0
+  seekBar.value = String(Math.round(progress * 10))
+  updateSeekBarProgress(progress)
+  currentTimeLabel.textContent = formatTime(currentTime)
+  durationLabel.textContent = formatTime(duration)
+}
+
+function syncPlaybackControls() {
+  const ready = audio.duration > 0
+  btnPlay.disabled = !ready || audio.playing
+  btnPause.disabled = !ready || !audio.playing
+  syncProgressUI()
 }
 
 function resetLyricVisualState() {
@@ -70,205 +98,123 @@ function resetLyricVisualState() {
   lyricTransitionT = 0
 }
 
-function setLyricsState(nextLyrics, source) {
+function setLyricsState(nextLyrics) {
   lyrics = nextLyrics.length > 0 ? nextLyrics : EMPTY_LYRICS
-  lyricsSource = source
   syncPretextLocale(lyrics)
   resetLyricVisualState()
 }
 
-function formatEmbeddedMetadata(metadata, fallback) {
-  if (!metadata.ti) return fallback
+function formatLyricsLabel(metadata, fallback) {
+  if (!metadata?.ti) return fallback
   return metadata.ar ? `${metadata.ar} — ${metadata.ti}` : metadata.ti
 }
 
-function applyLyricsInput(text, filename, source) {
+function applyLyricsInput(text, filename) {
   const { lyrics: parsed, metadata } = parseLyricsFile(text, filename, audio.duration || 180)
   if (parsed.length === 0) return false
 
   const isLRC = filename.toLowerCase().endsWith('.lrc')
-  const sourceKey = source === 'pasted'
-    ? 'pasted'
-    : (isLRC ? 'lrc' : 'plain')
-
-  setLyricsState(parsed, sourceKey)
+  setLyricsState(parsed)
 
   const count = parsed.filter(line => line.text).length
-  if (source === 'pasted') {
-    updateLyricsStatus(`Pasted lyrics (${count} lines, ${isLRC ? 'LRC timed' : 'auto-timed'})`)
-  } else {
-    const meta = formatEmbeddedMetadata(metadata, filename)
-    updateLyricsStatus(`${meta} (${count} lines, ${isLRC ? 'LRC' : 'PLAIN'})`)
-  }
-
+  const label = formatLyricsLabel(metadata, `${DEFAULT_TRACK.artist} — ${DEFAULT_TRACK.title}`)
+  updateLyricsStatus(`${label} (${count} lines, ${isLRC ? 'LRC' : 'PLAIN'})`)
   return true
 }
 
-function queueLyricsInput(text, filename, source, trackId) {
-  pendingLyricsInput = { text, filename, source, trackId }
+async function loadHostedLyrics(trackId) {
+  if (!DEFAULT_TRACK.lyricsUrl) return false
+
+  try {
+    const response = await fetch(DEFAULT_TRACK.lyricsUrl)
+    if (!response.ok) throw new Error(`lyrics request failed: ${response.status}`)
+    const text = await response.text()
+    if (trackId !== activeTrackId) return false
+
+    const filename = DEFAULT_TRACK.lyricsUrl.toLowerCase().endsWith('.txt')
+      ? 'skyfall.txt'
+      : 'skyfall.lrc'
+
+    return applyLyricsInput(text, filename)
+  } catch (error) {
+    console.warn('Hosted lyrics failed to load:', error)
+    return false
+  }
 }
 
-function applyPendingLyricsForTrack(trackId) {
-  if (!pendingLyricsInput || pendingLyricsInput.trackId !== trackId) return false
-  const pending = pendingLyricsInput
-  pendingLyricsInput = null
-  return applyLyricsInput(pending.text, pending.filename, pending.source)
-}
+async function fetchDefaultLyrics(trackId) {
+  updateLyricsStatus(`Searching lyrics for "${DEFAULT_TRACK.title}"...`)
 
-// Drop zone handles both audio and lyrics files
-dropZone.addEventListener('click', () => fileInput.click())
-dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('dragover') })
-dropZone.addEventListener('dragleave', () => dropZone.classList.remove('dragover'))
-dropZone.addEventListener('drop', async e => {
-  e.preventDefault()
-  dropZone.classList.remove('dragover')
-  const files = [...e.dataTransfer.files]
-
-  const audioFiles = files.filter(file => !isLyricsFile(file.name))
-  const lyricFiles = files.filter(file => isLyricsFile(file.name))
-
-  for (const file of audioFiles) {
-    await loadAudio(file)
-  }
-  for (const file of lyricFiles) {
-    await loadLyricsFile(file)
-  }
-})
-fileInput.addEventListener('change', e => {
-  if (e.target.files[0]) loadAudio(e.target.files[0])
-})
-
-// Lyrics file button
-btnLyrics.addEventListener('click', () => lyricsFileInput.click())
-lyricsFileInput.addEventListener('change', e => {
-  if (e.target.files[0]) loadLyricsFile(e.target.files[0])
-})
-
-// Paste lyrics modal
-btnPasteLyrics.addEventListener('click', () => lyricsModal.classList.add('open'))
-btnModalCancel.addEventListener('click', () => lyricsModal.classList.remove('open'))
-lyricsModal.addEventListener('click', e => {
-  if (e.target === lyricsModal) lyricsModal.classList.remove('open')
-})
-btnModalApply.addEventListener('click', () => {
-  const text = lyricsTextarea.value.trim()
-  if (!text) return
-  applyLyricsText(text)
-  lyricsModal.classList.remove('open')
-})
-
-btnPlay.addEventListener('click', () => { audio.play(); startLoop() })
-btnPause.addEventListener('click', () => audio.pause())
-
-let seeking = false
-seekBar.addEventListener('input', () => { seeking = true })
-seekBar.addEventListener('change', () => {
-  const t = (parseFloat(seekBar.value) / 100) * audio.duration
-  audio.seekTo(t)
-  seeking = false
-})
-
-async function loadAudio(file) {
-  const trackId = ++activeTrackId
-  clearAllTextCaches()
-  const tagsPromise = readID3Tags(file)
-
-  setLyricsState(EMPTY_LYRICS, 'demo')
-  updateLyricsStatus('Loading audio...')
-
-  const loaded = await audio.loadFile(file)
-  if (!loaded || trackId !== activeTrackId) return
-
-  btnPlay.disabled = false
-  btnPause.disabled = false
-  dropZone.style.display = 'none'
-
-  // Read ID3 tags for metadata
-  const tags = await tagsPromise
-  if (trackId !== activeTrackId) return
-
-  const displayName = tags.artist && tags.title
-    ? `${tags.artist} — ${tags.title}`
-    : tags.title || file.name
-  nowPlaying.textContent = displayName
-
-  // Start playback immediately — lyrics will load in parallel
-  audio.play()
-  startLoop()
-
-  if (applyPendingLyricsForTrack(trackId)) return
-
-  // If lyrics weren't manually loaded already, auto-fetch them
-  if (lyricsSource === 'demo') {
-    // Step 1: Check for embedded lyrics in the MP3
-    if (tags.lyrics && tags.lyrics.trim().length > 20) {
-      const isLRC = tags.lyrics.includes('[') && /\[\d{1,3}:\d{2}/.test(tags.lyrics)
-      if (isLRC) {
-        const { lyrics: parsed } = parseLyricsFile(tags.lyrics, 'embedded.lrc', audio.duration)
-        if (parsed.length > 2) {
-          setLyricsState(parsed, 'embedded')
-          updateLyricsStatus(`Embedded lyrics (${parsed.filter(l => l.text).length} lines, synced)`)
-          return
-        }
-      } else {
-        const parsed = parsePlainLyrics(tags.lyrics, audio.duration)
-        if (parsed.length > 2) {
-          setLyricsState(parsed, 'embedded')
-          updateLyricsStatus(`Embedded lyrics (${parsed.filter(l => l.text).length} lines, auto-timed)`)
-          return
-        }
-      }
-    }
-
-    // Step 2: Auto-fetch from lrclib.net using title + artist
-    updateLyricsStatus(`Searching lyrics for "${tags.title || file.name}"...`)
+  try {
     const fetched = await fetchLyrics({
-      title: tags.title,
-      artist: tags.artist,
-      fileName: file.name,
+      title: DEFAULT_TRACK.title,
+      artist: DEFAULT_TRACK.artist,
+      fileName: DEFAULT_TRACK.fileName,
       audioDuration: audio.duration,
     })
 
-    if (trackId !== activeTrackId || lyricsSource !== 'demo') return
+    if (trackId !== activeTrackId) return false
 
     if (fetched && fetched.lyrics.length > 2) {
-      setLyricsState(fetched.lyrics, 'fetched')
+      setLyricsState(fetched.lyrics)
       const meta = fetched.meta
       const desc = meta.artist ? `${meta.artist} — ${meta.title}` : meta.title
       updateLyricsStatus(desc)
-    } else {
-      updateLyricsStatus('No lyrics found — use "Load Lyrics" or "Paste Lyrics"')
+      return true
     }
+  } catch (error) {
+    console.warn('Default lyrics fetch failed:', error)
+  }
+
+  return false
+}
+
+async function loadDefaultTrack() {
+  const trackId = ++activeTrackId
+  clearAllTextCaches()
+  setLyricsState(EMPTY_LYRICS)
+  nowPlaying.textContent = `${DEFAULT_TRACK.artist} — ${DEFAULT_TRACK.title}`
+  updateLyricsStatus('Loading audio...')
+  syncPlaybackControls()
+
+  const loaded = await audio.loadUrl(DEFAULT_TRACK.audioUrl)
+  if (!loaded || trackId !== activeTrackId) {
+    updateLyricsStatus('Unable to load the default track')
+    syncPlaybackControls()
+    return
+  }
+
+  syncPlaybackControls()
+
+  const loadedHostedLyrics = await loadHostedLyrics(trackId)
+  if (loadedHostedLyrics || trackId !== activeTrackId) return
+
+  const fetchedLyrics = await fetchDefaultLyrics(trackId)
+  if (!fetchedLyrics && trackId === activeTrackId) {
+    updateLyricsStatus('Audio ready, lyrics unavailable')
   }
 }
 
-async function loadLyricsFile(file) {
-  const text = await file.text()
-  if (audio.duration === 0) {
-    queueLyricsInput(text, file.name, 'file', activeTrackId || 1)
-  } else {
-    pendingLyricsInput = null
-  }
+audio.onStateChange = syncPlaybackControls
 
-  if (applyLyricsInput(text, file.name, 'file') && audio.duration === 0 && file.name.toLowerCase().endsWith('.txt')) {
-    updateLyricsStatus('Plain lyrics loaded — timing will lock once the audio file finishes loading')
-  }
-}
+btnPlay.addEventListener('click', () => {
+  audio.play()
+  startLoop()
+  syncPlaybackControls()
+})
 
-function applyLyricsText(text) {
-  // Detect if it's LRC format
-  const isLRC = text.includes('[') && /\[\d{1,3}:\d{2}/.test(text)
-  const filename = isLRC ? 'pasted.lrc' : 'pasted.txt'
-  if (audio.duration === 0) {
-    queueLyricsInput(text, filename, 'pasted', activeTrackId || 1)
-  } else {
-    pendingLyricsInput = null
-  }
+btnPause.addEventListener('click', () => {
+  audio.pause()
+  syncPlaybackControls()
+})
 
-  if (applyLyricsInput(text, filename, 'pasted') && audio.duration === 0 && !isLRC) {
-    updateLyricsStatus('Plain lyrics pasted — timing will lock once the audio file finishes loading')
-  }
-}
+seekBar.addEventListener('input', event => {
+  if (audio.duration <= 0) return
+  const target = event.currentTarget
+  const progress = Number.parseFloat(target.value) / 1000
+  audio.seekTo(progress * audio.duration)
+  syncProgressUI()
+})
 
 // ── Pretext integration ────────────────────────────────────────────────
 const preparedCache = new Map()
@@ -1099,11 +1045,7 @@ function render(timestamp) {
   drawLyrics(metrics, w, h, fakeTime)
   updateParticles()
   drawParticles()
-
-  // Update seek bar
-  if (audio.playing && !seeking) {
-    seekBar.value = (audio.currentTime / audio.duration) * 100
-  }
+  syncProgressUI()
 
   animFrame = requestAnimationFrame(render)
 }
@@ -1134,3 +1076,5 @@ function startLoop() {
 }
 
 startLoop()
+syncPlaybackControls()
+loadDefaultTrack()

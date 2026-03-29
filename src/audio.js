@@ -12,6 +12,7 @@ export class AudioEngine {
     this.frequencyData = new Uint8Array(0)
     this.timeDomainData = new Uint8Array(0)
     this.loadVersion = 0
+    this.onStateChange = null
   }
 
   async init() {
@@ -27,15 +28,27 @@ export class AudioEngine {
   }
 
   async loadFile(file) {
+    const arrayBuffer = await file.arrayBuffer()
+    return this.loadArrayBuffer(arrayBuffer)
+  }
+
+  async loadUrl(url) {
+    const response = await fetch(url)
+    if (!response.ok) throw new Error(`audio request failed: ${response.status}`)
+    const arrayBuffer = await response.arrayBuffer()
+    return this.loadArrayBuffer(arrayBuffer)
+  }
+
+  async loadArrayBuffer(arrayBuffer) {
     const loadVersion = ++this.loadVersion
     if (!this.ctx) await this.init()
     this.stop()
     this.audioBuffer = null
-    const arrayBuffer = await file.arrayBuffer()
     const decoded = await this.ctx.decodeAudioData(arrayBuffer)
     if (loadVersion !== this.loadVersion) return false
     this.audioBuffer = decoded
     this.pauseOffset = 0
+    this.notifyStateChange()
     return true
   }
 
@@ -50,6 +63,7 @@ export class AudioEngine {
     this.source = source
     this.startTime = this.ctx.currentTime - this.pauseOffset
     this.playing = true
+    this.notifyStateChange()
 
     source.onended = () => {
       if (this.source !== source) return
@@ -58,6 +72,7 @@ export class AudioEngine {
         this.playing = false
         this.pauseOffset = 0
       }
+      this.notifyStateChange()
     }
   }
 
@@ -65,7 +80,6 @@ export class AudioEngine {
     if (!this.playing || !this.source) return
     this.pauseOffset = this.ctx.currentTime - this.startTime
     this.stop(false)
-    this.playing = false
   }
 
   seekTo(time) {
@@ -91,6 +105,7 @@ export class AudioEngine {
     }
     this.playing = false
     if (resetOffset) this.pauseOffset = 0
+    this.notifyStateChange()
   }
 
   get currentTime() {
@@ -155,5 +170,11 @@ export class AudioEngine {
     rms = Math.sqrt(rms / wave.length)
 
     return { bass, mid, treble, overall, rms, frequencyData: freq, waveformData: wave }
+  }
+
+  notifyStateChange() {
+    if (typeof this.onStateChange === 'function') {
+      this.onStateChange()
+    }
   }
 }
