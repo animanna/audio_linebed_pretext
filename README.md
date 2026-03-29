@@ -188,9 +188,9 @@ The screenshots below were captured from a real local run of the app. The loaded
 
 ![Loaded visualizer UI](docs/screenshots/loaded-state.png)
 
-### Lyrics paste modal
+### Hero image
 
-![Lyrics modal UI](docs/screenshots/lyrics-modal.png)
+![Pretext hero image](docs/screenshots/pretext_hero.png)
 
 ## Walkthrough
 
