@@ -90,6 +90,10 @@ function syncPlaybackControls() {
   syncProgressUI()
 }
 
+function getPlaybackTime() {
+  return audio.currentTime
+}
+
 function resetLyricVisualState() {
   clearLocalTextCaches()
   prevLyricText = ''
@@ -711,7 +715,7 @@ function getContourSample({ t, lineIdx, lineCount, totalWidth, metrics, time }) 
 }
 
 function drawLyrics(metrics, w, h, time) {
-  const currentTime = audio.playing ? audio.currentTime : (audio.pauseOffset || time * 0.15)
+  const currentTime = getPlaybackTime()
   const lyric = getCurrentLyric(lyrics, currentTime)
   const progress = getLyricProgress(lyrics, currentTime)
 
@@ -950,7 +954,7 @@ function drawLyrics(metrics, w, h, time) {
 
 // ── Context lyrics ─────────────────────────────────────────────────────
 function drawContextLyrics(metrics, w, h, time) {
-  const currentTime = audio.playing ? audio.currentTime : (audio.pauseOffset || time * 0.15)
+  const currentTime = getPlaybackTime()
   const fontSize = Math.min(w, h) * 0.02
   const font = `300 ${Math.round(fontSize)}px Inter`
   const lineHeight = fontSize * 1.6
