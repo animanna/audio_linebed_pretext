@@ -13,3 +13,5 @@ test-results/
 .impeccable/
 
 *.mp3
+
+vite.config.js
