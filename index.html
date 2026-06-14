@@ -161,6 +161,94 @@
       cursor: not-allowed;
     }
 
+    .icon-row {
+      gap: 14px;
+    }
+
+    .icon-btn {
+      position: relative;
+      min-width: 0;
+      width: 48px;
+      height: 48px;
+      padding: 0;
+      border-radius: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .icon-btn svg {
+      width: 22px;
+      height: 22px;
+      fill: currentColor;
+      display: block;
+    }
+
+    .icon-btn:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* Hover/focus tooltip carrying the old text label */
+    .icon-btn::after {
+      content: attr(data-tip);
+      position: absolute;
+      bottom: calc(100% + 10px);
+      left: 50%;
+      transform: translateX(-50%) translateY(4px);
+      padding: 6px 10px;
+      border-radius: 8px;
+      background: rgba(9, 9, 14, 0.92);
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      color: rgba(255, 255, 255, 0.92);
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.04em;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 0.16s ease, transform 0.16s cubic-bezier(0.22, 1, 0.36, 1);
+      z-index: 20;
+    }
+
+    .icon-btn:hover:not(:disabled)::after,
+    .icon-btn:focus-visible::after {
+      opacity: 1;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .icon-btn::after { transition: opacity 0.16s ease; transform: translateX(-50%); }
+    }
+
+    .icon-chevron {
+      transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+    }
+
+    /* Collapsed player: keep only transport + restore, free the screen bottom */
+    .transport-shell.minimized {
+      min-width: 0;
+      padding: 10px 12px;
+      gap: 0;
+    }
+
+    .transport-shell.minimized .now-playing,
+    .transport-shell.minimized .lyrics-status,
+    .transport-shell.minimized .seek-bar,
+    .transport-shell.minimized .time-row,
+    .transport-shell.minimized #btn-viz,
+    .transport-shell.minimized #btn-load {
+      display: none;
+    }
+
+    .transport-shell.minimized .icon-chevron {
+      transform: rotate(180deg);
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .icon-chevron { transition: none; }
+    }
+
     .now-playing {
       font-size: 20px;
       font-weight: 600;
@@ -178,6 +266,54 @@
       text-align: center;
     }
 
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    #drop-overlay {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(10, 10, 15, 0.78);
+      backdrop-filter: blur(8px);
+      pointer-events: none;
+    }
+
+    #drop-overlay.active {
+      display: flex;
+    }
+
+    .drop-card {
+      padding: 40px 56px;
+      border: 2px dashed rgba(255, 167, 62, 0.8);
+      border-radius: 24px;
+      background: rgba(255, 255, 255, 0.04);
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+      text-align: center;
+    }
+
+    .drop-card small {
+      display: block;
+      margin-top: 8px;
+      font-size: 12px;
+      font-weight: 300;
+      opacity: 0.6;
+      font-family: 'Space Mono', monospace;
+    }
+
     @media (max-width: 640px) {
       .transport-shell {
         min-width: calc(100vw - 24px);
@@ -185,12 +321,7 @@
       }
 
       .controls .row {
-        gap: 8px;
-      }
-
-      button {
-        flex: 1;
-        min-width: 0;
+        gap: 12px;
       }
 
       .now-playing {
@@ -221,10 +352,32 @@
         <span id="current-time">0:00</span>
         <span id="duration">0:00</span>
       </div>
-      <div class="row">
-        <button id="btn-play" disabled>Play</button>
-        <button id="btn-pause" disabled>Pause</button>
+      <div class="row icon-row">
+        <button id="btn-viz" class="icon-btn" type="button" aria-label="Visualizer" data-tip="Visualizer">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h3v7H4zM10.5 4h3v16h-3zM17 9h3v11h-3z" /></svg>
+        </button>
+        <button id="btn-play" class="icon-btn" type="button" aria-label="Play" data-tip="Play" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
+        </button>
+        <button id="btn-pause" class="icon-btn" type="button" aria-label="Pause" data-tip="Pause" disabled>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5h4v14H6zM14 5h4v14h-4z" /></svg>
+        </button>
+        <button id="btn-load" class="icon-btn" type="button" aria-label="Load audio and/or lyrics" data-tip="Load audio + lyrics">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 16V7.83l-2.59 2.58L7 9l5-5 5 5-1.41 1.41L13 7.83V16h-2zM5 18h14v2H5z" /></svg>
+        </button>
+        <button id="btn-minimize" class="icon-btn" type="button" aria-label="Minimize player" data-tip="Minimize">
+          <svg class="icon-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z" /></svg>
+        </button>
       </div>
+    </div>
+  </div>
+
+  <input id="file-input" class="visually-hidden" type="file" multiple accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a,.aac,.opus,.weba,.lrc,.txt,text/plain" />
+
+  <div id="drop-overlay" aria-hidden="true">
+    <div class="drop-card">
+      Drop audio or lyrics
+      <small>.mp3 .wav .ogg .flac &nbsp;·&nbsp; .lrc .txt</small>
     </div>
   </div>
 

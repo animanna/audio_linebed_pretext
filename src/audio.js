@@ -18,8 +18,10 @@ export class AudioEngine {
   async init() {
     this.ctx = new AudioContext()
     this.analyser = this.ctx.createAnalyser()
-    this.analyser.fftSize = 2048
-    this.analyser.smoothingTimeConstant = 0.82
+    // Large FFT so low octaves resolve to individual semitones (~1.3 Hz/bin
+    // at 44.1 kHz) for the chromatic linebed visualization.
+    this.analyser.fftSize = 16384
+    this.analyser.smoothingTimeConstant = 0.65
     this.analyser.connect(this.ctx.destination)
 
     const bufLen = this.analyser.frequencyBinCount
@@ -118,6 +120,10 @@ export class AudioEngine {
     return this.audioBuffer ? this.audioBuffer.duration : 0
   }
 
+  get sampleRate() {
+    return this.ctx ? this.ctx.sampleRate : 44100
+  }
+
   // Get frequency spectrum data (0-255 per bin)
   getFrequencyData() {
     if (this.analyser) this.analyser.getByteFrequencyData(this.frequencyData)
@@ -169,7 +175,7 @@ export class AudioEngine {
     }
     rms = Math.sqrt(rms / wave.length)
 
-    return { bass, mid, treble, overall, rms, frequencyData: freq, waveformData: wave }
+    return { bass, mid, treble, overall, rms, frequencyData: freq, waveformData: wave, sampleRate: this.sampleRate }
   }
 
   notifyStateChange() {

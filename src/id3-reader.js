@@ -1,10 +1,19 @@
-// Minimal ID3v2 tag reader for MP3 files
-// Extracts: title (TIT2), artist (TPE1), album (TALB), embedded lyrics (USLT)
+// Minimal audio tag reader.
+// MP3 (ID3v2): title (TIT2), artist (TPE1), album (TALB), embedded lyrics (USLT).
+// FLAC (Vorbis comments): TITLE, ARTIST, ALBUM, (UNSYNCED)LYRICS.
 
 export async function readID3Tags(file) {
   const result = { title: '', artist: '', album: '', lyrics: '' }
 
   try {
+    // Peek the first 4 bytes to pick a container format.
+    const head = new Uint8Array(await file.slice(0, 4).arrayBuffer())
+
+    // FLAC magic: "fLaC"
+    if (head[0] === 0x66 && head[1] === 0x4c && head[2] === 0x61 && head[3] === 0x43) {
+      return await readFlacTags(file, result)
+    }
+
     // Read the first 128KB — enough for ID3v2 header + common tags
     const slice = file.slice(0, 131072)
     const buffer = await slice.arrayBuffer()
@@ -165,6 +174,88 @@ function decodeUTF16BE(bytes) {
     str += String.fromCharCode(code)
   }
   return str
+}
+
+// FLAC stores metadata in a chain of blocks after the "fLaC" marker.
+// Each block: 1 byte header (bit 7 = last-block flag, bits 0-6 = type) + 3-byte
+// big-endian length, then the block body. Type 4 is VORBIS_COMMENT. A PICTURE
+// block (type 6) can be megabytes, so walk headers with small slices rather than
+// reading a fixed-size prefix that might not reach the comments.
+async function readFlacTags(file, result) {
+  let offset = 4 // skip "fLaC"
+  const maxBlocks = 64 // guard against malformed chains
+
+  for (let i = 0; i < maxBlocks; i++) {
+    if (offset + 4 > file.size) break
+    const header = new Uint8Array(await file.slice(offset, offset + 4).arrayBuffer())
+    const isLast = (header[0] & 0x80) !== 0
+    const blockType = header[0] & 0x7f
+    const blockSize = (header[1] << 16) | (header[2] << 8) | header[3]
+    const bodyStart = offset + 4
+
+    if (blockType === 4) {
+      const body = new Uint8Array(await file.slice(bodyStart, bodyStart + blockSize).arrayBuffer())
+      parseVorbisComment(body, result)
+      break
+    }
+
+    if (isLast) break
+    offset = bodyStart + blockSize
+  }
+
+  if (!result.title) {
+    result.title = file.name.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ')
+  }
+
+  return result
+}
+
+// VORBIS_COMMENT body: uint32-LE vendor length + vendor string, uint32-LE comment
+// count, then each comment as uint32-LE length + UTF-8 "FIELD=value".
+function parseVorbisComment(body, result) {
+  const utf8 = new TextDecoder('utf-8')
+  const readU32LE = (p) => body[p] | (body[p + 1] << 8) | (body[p + 2] << 16) | (body[p + 3] << 24)
+
+  let p = 0
+  if (p + 4 > body.length) return
+  const vendorLen = readU32LE(p) >>> 0
+  p += 4 + vendorLen
+  if (p + 4 > body.length) return
+  const count = readU32LE(p) >>> 0
+  p += 4
+
+  for (let i = 0; i < count; i++) {
+    if (p + 4 > body.length) break
+    const len = readU32LE(p) >>> 0
+    p += 4
+    if (p + len > body.length) break
+    const comment = utf8.decode(body.slice(p, p + len))
+    p += len
+
+    const eq = comment.indexOf('=')
+    if (eq === -1) continue
+    const key = comment.slice(0, eq).toUpperCase()
+    const value = comment.slice(eq + 1)
+
+    switch (key) {
+      case 'TITLE':
+        if (!result.title) result.title = value
+        break
+      case 'ARTIST':
+        if (!result.artist) result.artist = value
+        break
+      case 'ALBUM':
+        if (!result.album) result.album = value
+        break
+      case 'LYRICS':
+      case 'UNSYNCEDLYRICS':
+      case 'UNSYNCED LYRICS':
+      case 'SYNCEDLYRICS':
+      case 'LRC':
+        if (!result.lyrics) result.lyrics = value
+        break
+    }
+  }
 }
 
 async function tryID3v1(file, result) {

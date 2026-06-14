@@ -8,3 +8,6 @@ test-results/
 .captures/
 .playwright-cli/
 .claude/
+
+.gemini/
+.impeccable/
