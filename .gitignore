@@ -15,3 +15,6 @@ test-results/
 *.mp3
 
 vite.config.js
+
+# here.now credentials / local publish state (never commit)
+.herenow/

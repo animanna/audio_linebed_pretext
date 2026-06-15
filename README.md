@@ -2,11 +2,11 @@
 
 Animated music visualization with synced lyrics, built around `@chenglou/pretext` for text measurement and manual line layout.
 
-[![Live App](https://img.shields.io/badge/Live%20App-Netlify-00C7B7?style=for-the-badge&logo=netlify&logoColor=white)](https://audiovisualizaionpretext.netlify.app/)
+[![Live App](https://img.shields.io/badge/Live%20App-here.now-6E56CF?style=for-the-badge&logoColor=white)](https://nutmeg-vow-nwgm.here.now/)
 
-> Live demo: [audiovisualizaionpretext.netlify.app](https://audiovisualizaionpretext.netlify.app/)
+> Live demo: [nutmeg-vow-nwgm.here.now](https://nutmeg-vow-nwgm.here.now/)
 >
-> The public build loads `Skyfall` by default with synced lyrics, play/pause controls, and a seek bar.
+> The app starts blank — begin by capturing system audio or loading a song, with synced lyrics, play/pause controls, and a seek bar.
 
 ![Pretext hero image](docs/screenshots/pretext_hero.png)
 
@@ -167,13 +167,77 @@ npm run dev
 
 Then open the local Vite URL in your browser.
 
+### System "now playing" sync (optional)
+
+The browser sandbox can't read what other apps are playing, so a small local
+helper bridges the OS media session to the app:
+
+```bash
+npm run build      # the bridge serves the production build from dist/
+npm run bridge     # then open http://localhost:8787
+```
+
+The bridge reads the current track's **title / artist / album** from the OS and
+exposes it at `GET /api/now-playing`. The app polls it, queries lrclib for the
+matching lyrics, and syncs the lyric timeline to the live playback position — so
+lyrics follow whatever is playing in any player.
+
+Metadata readers per platform:
+
+- **Linux** — MPRIS via `playerctl`
+- **macOS** — `nowplaying-cli` (`brew install nowplaying-cli`)
+- **Windows** — SMTC via PowerShell (built in)
+
+### System audio capture
+
+The mic button opens a capture-source menu so the spectrum can react to audio
+playing outside the app. Sources:
+
+- **System output (bridge)** — appears only when the page is served by the
+  bridge on Linux. The bridge taps the default output's monitor with `parec` and
+  streams raw PCM at `GET /api/audio?rate=N`, so the visualizer reacts to **any
+  native app's audio** (Spotify, Deezer, a desktop player — not just tabs).
+- **Browser tab / window** — `getDisplayMedia`; capture a tab/window and tick
+  "Share tab audio". Works in-browser without the bridge.
+- **Input devices…** — opt-in `getUserMedia` on a monitor / line-in device (asks
+  for mic permission; only lists monitors the browser chooses to expose).
+
+**How to use (full system audio, Linux):**
+
+1. `npm run build && npm run bridge`, then open `http://localhost:8787`.
+2. Play music in any app.
+3. Click the mic button → **System output (bridge)**.
+4. Title/artist + lrclib lyrics come from the bridge; the spectrum follows the
+   live audio. Click the button again to stop (a faint icon, top-left, shows
+   capture is active).
+
+**Limitations:**
+
+- **Bridge PCM capture is Linux-only** (`parec`). On macOS/Windows use tab-share,
+  or a loopback device under "Input devices…" (BlackHole on macOS, Stereo Mix /
+  VB-Cable on Windows).
+- **Mobile browsers can't capture system or tab audio at all** — Android/iOS
+  block `getDisplayMedia` audio. A phone can only visualize files loaded into the
+  app itself, or use the bridge as a remote display of a desktop.
+- **Hosted here.now build:** sends a `microphone=()` permissions policy, so only
+  tab-share works there; mic/device capture is blocked. Run the local bridge for
+  full system/native-app audio.
+- **Capture carries no metadata by itself** — title/artist/lyrics always come
+  from the bridge, so lyrics sync only when the bridge is running.
+
 ## Controls
 
-- Drop audio files onto the app
-- Drop lyric files alongside the audio, or use `Load Lyrics`
-- Use `Paste Lyrics` for timed or plain text input
-- `Play` / `Pause` control playback
-- The seek bar scrubs through the track
+The transport is a row of icon buttons (hover for tooltips):
+
+- **Visualizer** — switch between Linebed (default) and Bars + Wave
+- **Linebed presets** — Smooth / Dynamic / Custom (amplitude, contrast, velocity,
+  gate, flip-Y sliders); see [Visualizers](#visualizers)
+- **Play / Pause** and the **seek bar** scrub the track
+- **Load** — pick audio and/or `.lrc` / `.txt` lyric files
+- **Capture** — open the [system audio capture](#system-audio-capture) menu
+- **Minimize** — collapse the player to free the screen
+
+You can also **drag-and-drop** audio or lyric files anywhere on the window.
 
 Supported lyric inputs:
 
@@ -182,9 +246,20 @@ Supported lyric inputs:
 
 Supported audio input is browser-dependent because decoding uses `AudioContext.decodeAudioData`.
 
+## Visualizers
+
+Two modes, toggled with the Visualizer button:
+
+- **Linebed** (default) — a scrolling, fake-3D stack of chromatic spectrum
+  snapshots (Joy-Division-style ridges), newest line nearest the viewer. Three
+  presets: **Smooth** (gentle), **Dynamic** (high-contrast, volume-reactive), and
+  **Custom** (live sliders for amplitude, contrast/gamma, velocity/transient
+  punch, noise gate, and Y-flip). The active preset persists in `localStorage`.
+- **Bars + Wave** — classic frequency bars plus a waveform trace.
+
 ## Screenshots
 
-The screenshots below were captured from a real local run of the app. The loaded-state and walkthrough capture use a local `Skyfall.mp3` upload so the visuals reflect the actual audio + lyric pipeline rather than a mocked frame.
+The screenshots below were captured from a real local run of the app, using a local audio upload so the visuals reflect the actual audio + lyric pipeline rather than a mocked frame.
 
 
 ### Pretext screenshot
@@ -199,11 +274,13 @@ If generated successfully, the walkthrough video is stored here:
 
 ## File Map
 
-- `src/main.js`: main render loop, UI wiring, Pretext integration, lyric drawing
-- `src/audio.js`: audio loading, playback, analyser metrics
+- `src/main.js`: main render loop, UI wiring, Pretext integration, lyric drawing, visualizers, capture menu
+- `src/audio.js`: audio loading, playback, analyser metrics, live capture (tab / device / bridge PCM stream)
 - `src/beat-detect.js`: beat and motion-state extraction
 - `src/lrc-parser.js`: LRC/plain-text lyric parsing
 - `src/lyrics-fetch.js`: LRCLIB search and scoring
+- `src/now-playing-bridge.js`: client for the local now-playing bridge
+- `bridge/now-playing-bridge.mjs`: local bridge — OS metadata + system-audio PCM stream + static server
 - `index.html`: UI shell and controls
 
 ## Limitations

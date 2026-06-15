@@ -12,6 +12,7 @@ import { getCurrentLyric, getLyricProgress } from "./lyrics.js";
 import { parseLyricsFile } from "./lrc-parser.js";
 import { fetchLyrics } from "./lyrics-fetch.js";
 import { readID3Tags } from "./id3-reader.js";
+import { NowPlayingBridge } from "./now-playing-bridge.js";
 
 // ── State ──────────────────────────────────────────────────────────────
 const APP_BASE_URL = import.meta.env.BASE_URL || "/";
@@ -28,6 +29,8 @@ const DEFAULT_TRACK = {
 const EMPTY_LYRICS = [{ time: 0, text: "", emphasis: false }];
 const audio = new AudioEngine();
 const beat = new BeatDetector();
+const bridge = new NowPlayingBridge();
+let bridgeVersion = 0; // guards async lyric fetches against track changes
 let lyrics = EMPTY_LYRICS;
 let animFrame = null;
 let lastTimestamp = 0;
@@ -55,6 +58,11 @@ const seekBar = document.getElementById("seek-bar");
 const currentTimeLabel = document.getElementById("current-time");
 const durationLabel = document.getElementById("duration");
 const btnLoad = document.getElementById("btn-load");
+const btnCapture = document.getElementById("btn-capture");
+const captureIndicator = document.getElementById("capture-indicator");
+const capturePanel = document.getElementById("capture-panel");
+const capList = document.getElementById("cap-list");
+const capHint = document.getElementById("cap-hint");
 const btnViz = document.getElementById("btn-viz");
 const btnMinimize = document.getElementById("btn-minimize");
 const transportShell = document.querySelector(".transport-shell");
@@ -79,8 +87,9 @@ function updateSeekBarProgress(percent) {
 }
 
 function syncProgressUI() {
-  const duration = audio.duration || 0;
-  const currentTime = audio.currentTime || 0;
+  const onBridge = bridge.active && bridge.track;
+  const duration = onBridge ? bridge.track.length || 0 : audio.duration || 0;
+  const currentTime = onBridge ? getPlaybackTime() : audio.currentTime || 0;
   const progress = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   seekBar.disabled = duration <= 0;
@@ -98,6 +107,10 @@ function syncPlaybackControls() {
 }
 
 function getPlaybackTime() {
+  if (bridge.active) {
+    const t = bridge.getTime();
+    if (t !== null) return t;
+  }
   return audio.currentTime;
 }
 
@@ -211,7 +224,10 @@ async function loadDefaultTrack() {
   }
 }
 
-audio.onStateChange = syncPlaybackControls;
+audio.onStateChange = () => {
+  syncPlaybackControls();
+  syncCaptureUI();
+};
 
 btnPlay.addEventListener("click", () => {
   audio.play();
@@ -225,9 +241,10 @@ btnPause.addEventListener("click", () => {
 });
 
 // ── Visualizer selection ────────────────────────────────────────────────
-const VIZ_MODES = ["default", "linebed"];
+// Linebed is the landing default; the bars+wave mode is the alternate.
+const VIZ_MODES = ["linebed", "default"];
 const VIZ_LABELS = { default: "Bars + Wave", linebed: "Linebed" };
-let vizMode = "default";
+let vizMode = "linebed";
 try {
   const saved = localStorage.getItem("vizMode");
   if (saved && VIZ_MODES.includes(saved)) vizMode = saved;
@@ -246,12 +263,254 @@ btnViz.addEventListener("click", () => {
     localStorage.setItem("vizMode", vizMode);
   } catch {}
   updateVizButton();
+  syncLinebedButton();
 });
 
 updateVizButton();
 
+// ── Linebed presets ─────────────────────────────────────────────────────
+// Two fixed presets plus an editable Custom one. Params drive both the
+// per-row spectrum mapping (contrast/gate/velocity) and the draw amplitude.
+//   amplitude — vertical height scale of every ridge
+//   contrast  — gamma on each column; >1 flattens quiet and spikes loud
+//   velocity  — boosts rising energy frame-to-frame so attacks punch
+//   gate      — floor that flattens low-level noise into silence
+const LINEBED_PRESETS = {
+  smooth: { amplitude: 1.0, contrast: 0.85, velocity: 0.0, gate: 0.0, flip: true },
+  dynamic: { amplitude: 1.55, contrast: 1.9, velocity: 0.95, gate: 0.13, flip: true },
+};
+const LINEBED_CUSTOM_DEFAULT = { amplitude: 1.55, contrast: 1.9, velocity: 0.95, gate: 0.13, flip: true };
+let linebedPreset = "dynamic";
+let linebedCustom = { ...LINEBED_CUSTOM_DEFAULT };
+try {
+  const p = localStorage.getItem("linebedPreset");
+  if (p && (p === "smooth" || p === "dynamic" || p === "custom")) linebedPreset = p;
+  const c = JSON.parse(localStorage.getItem("linebedCustom") || "null");
+  if (c && typeof c === "object") linebedCustom = { ...LINEBED_CUSTOM_DEFAULT, ...c };
+} catch {}
+
+function getLinebedParams() {
+  if (linebedPreset === "custom") return linebedCustom;
+  return LINEBED_PRESETS[linebedPreset] || LINEBED_PRESETS.smooth;
+}
+
+const linebedPanel = document.getElementById("linebed-panel");
+const btnLinebed = document.getElementById("btn-linebed");
+const lbSliders = document.getElementById("lb-sliders");
+const lbInputs = {
+  amplitude: document.getElementById("lb-amplitude"),
+  contrast: document.getElementById("lb-contrast"),
+  velocity: document.getElementById("lb-velocity"),
+  gate: document.getElementById("lb-gate"),
+};
+const lbFlip = document.getElementById("lb-flip");
+
+function syncLinebedButton() {
+  // The preset control only applies to linebed; dim it under the other viz.
+  const on = vizMode === "linebed";
+  btnLinebed.disabled = false;
+  btnLinebed.style.opacity = on ? "" : "0.4";
+  btnLinebed.dataset.tip = on ? "Linebed presets" : "Linebed presets (switch viz first)";
+  if (!on) closeLinebedPanel();
+}
+
+function syncLinebedPanel() {
+  linebedPanel.querySelectorAll(".lb-preset").forEach((b) => {
+    const sel = b.dataset.preset === linebedPreset;
+    b.setAttribute("aria-checked", sel ? "true" : "false");
+  });
+  lbSliders.classList.toggle("disabled", linebedPreset !== "custom");
+  const vals = getLinebedParams();
+  for (const k in lbInputs) lbInputs[k].value = vals[k];
+  const flip = vals.flip !== false;
+  lbFlip.setAttribute("aria-checked", flip ? "true" : "false");
+  lbFlip.textContent = flip ? "Newest at bottom" : "Newest at top";
+}
+
+function openLinebedPanel() {
+  if (vizMode !== "linebed") {
+    vizMode = "linebed";
+    try { localStorage.setItem("vizMode", vizMode); } catch {}
+    updateVizButton();
+    syncLinebedButton();
+  }
+  linebedPanel.hidden = false;
+  btnLinebed.setAttribute("aria-expanded", "true");
+  syncLinebedPanel();
+}
+
+function closeLinebedPanel() {
+  linebedPanel.hidden = true;
+  btnLinebed.setAttribute("aria-expanded", "false");
+}
+
+btnLinebed.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (linebedPanel.hidden) openLinebedPanel();
+  else closeLinebedPanel();
+});
+
+linebedPanel.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", () => closeLinebedPanel());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !linebedPanel.hidden) closeLinebedPanel();
+});
+
+linebedPanel.querySelectorAll(".lb-preset").forEach((b) => {
+  b.addEventListener("click", () => {
+    linebedPreset = b.dataset.preset;
+    try { localStorage.setItem("linebedPreset", linebedPreset); } catch {}
+    linebedHistory.length = 0; // restart so new dynamics apply at once
+    linebedPrevRow = null;
+    syncLinebedPanel();
+  });
+});
+
+function adoptCustom() {
+  if (linebedPreset !== "custom") {
+    // Seed Custom from whatever fixed preset was active, then switch to it.
+    linebedCustom = { ...getLinebedParams() };
+    linebedPreset = "custom";
+    try { localStorage.setItem("linebedPreset", linebedPreset); } catch {}
+  }
+}
+
+for (const k in lbInputs) {
+  lbInputs[k].addEventListener("input", () => {
+    adoptCustom();
+    linebedCustom[k] = parseFloat(lbInputs[k].value);
+    try { localStorage.setItem("linebedCustom", JSON.stringify(linebedCustom)); } catch {}
+    syncLinebedPanel();
+  });
+}
+
+lbFlip.addEventListener("click", () => {
+  adoptCustom();
+  linebedCustom.flip = !(linebedCustom.flip !== false);
+  try { localStorage.setItem("linebedCustom", JSON.stringify(linebedCustom)); } catch {}
+  syncLinebedPanel();
+});
+
+syncLinebedButton();
+
+// ── Lyrics styling + motion controls ────────────────────────────────────
+// Font, size, effect, timing offset, and a global motion multiplier (0 = still
+// text — accessibility). All persisted; the render loop reads them live.
+const LYRIC_FONTS = {
+  sans: { label: "Sans", family: "Inter", weight: 600, emphasisWeight: 800 },
+  serif: { label: "Serif", family: '"Playfair Display"', weight: 600, emphasisWeight: 800 },
+  cursive: { label: "Cursive", family: '"Dancing Script"', weight: 600, emphasisWeight: 700 },
+  mono: { label: "Mono", family: '"Space Mono"', weight: 400, emphasisWeight: 700 },
+};
+const LYRIC_EFFECTS = ["wordwave", "reveal", "fade"];
+
+function loadNum(key, def, lo, hi) {
+  try {
+    const v = parseFloat(localStorage.getItem(key));
+    if (Number.isFinite(v)) return Math.max(lo, Math.min(hi, v));
+  } catch {}
+  return def;
+}
+
+let lyricMotion = loadNum("lyricMotion", 1, 0, 1.4);
+let lyricFontScale = loadNum("lyricFontScale", 1, 0.6, 1.6);
+let lyricOffset = loadNum("lyricOffset", 0, -3, 3);
+let lyricFontKey = "sans";
+let lyricEffect = "wordwave";
+try {
+  const f = localStorage.getItem("lyricFontKey");
+  if (f && LYRIC_FONTS[f]) lyricFontKey = f;
+  const e = localStorage.getItem("lyricEffect");
+  if (e && LYRIC_EFFECTS.includes(e)) lyricEffect = e;
+} catch {}
+
+// Playback time the lyrics follow, with the user's sync offset applied.
+function getLyricTime() {
+  return getPlaybackTime() + lyricOffset;
+}
+
+const btnMotion = document.getElementById("btn-motion");
+const motionPanel = document.getElementById("motion-panel");
+const lmMotion = document.getElementById("lm-motion");
+const lmLabel = document.getElementById("lm-label");
+const lmFont = document.getElementById("lm-font");
+const lmSize = document.getElementById("lm-size");
+const lmSizeLabel = document.getElementById("lm-size-label");
+const lmEffect = document.getElementById("lm-effect");
+const lmOffset = document.getElementById("lm-offset");
+const lmOffsetLabel = document.getElementById("lm-offset-label");
+
+function syncMotionPanel() {
+  lmMotion.value = lyricMotion;
+  lmLabel.textContent = `Motion ${Math.round(lyricMotion * 100)}%`;
+  lmFont.value = lyricFontKey;
+  lmSize.value = lyricFontScale;
+  lmSizeLabel.textContent = `Size ${Math.round(lyricFontScale * 100)}%`;
+  lmEffect.value = lyricEffect;
+  lmOffset.value = lyricOffset;
+  lmOffsetLabel.textContent = `Offset ${lyricOffset > 0 ? "+" : ""}${lyricOffset.toFixed(1)}s`;
+}
+
+function closeMotionPanel() {
+  motionPanel.hidden = true;
+  btnMotion.setAttribute("aria-expanded", "false");
+}
+
+btnMotion.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (motionPanel.hidden) {
+    syncMotionPanel();
+    motionPanel.hidden = false;
+    btnMotion.setAttribute("aria-expanded", "true");
+  } else {
+    closeMotionPanel();
+  }
+});
+
+lmMotion.addEventListener("input", () => {
+  lyricMotion = parseFloat(lmMotion.value);
+  try { localStorage.setItem("lyricMotion", String(lyricMotion)); } catch {}
+  syncMotionPanel();
+});
+
+lmFont.addEventListener("change", () => {
+  if (LYRIC_FONTS[lmFont.value]) lyricFontKey = lmFont.value;
+  try { localStorage.setItem("lyricFontKey", lyricFontKey); } catch {}
+  clearLocalTextCaches(); // re-layout under the new face
+  syncMotionPanel();
+});
+
+lmSize.addEventListener("input", () => {
+  lyricFontScale = parseFloat(lmSize.value);
+  try { localStorage.setItem("lyricFontScale", String(lyricFontScale)); } catch {}
+  syncMotionPanel();
+});
+
+lmEffect.addEventListener("change", () => {
+  if (LYRIC_EFFECTS.includes(lmEffect.value)) lyricEffect = lmEffect.value;
+  try { localStorage.setItem("lyricEffect", lyricEffect); } catch {}
+  syncMotionPanel();
+});
+
+lmOffset.addEventListener("input", () => {
+  lyricOffset = parseFloat(lmOffset.value);
+  try { localStorage.setItem("lyricOffset", String(lyricOffset)); } catch {}
+  syncMotionPanel();
+});
+
+motionPanel.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", () => closeMotionPanel());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !motionPanel.hidden) closeMotionPanel();
+});
+
 btnMinimize.addEventListener("click", () => {
   const minimized = transportShell.classList.toggle("minimized");
+  if (minimized) {
+    closeMotionPanel();
+    closeLinebedPanel();
+    closeCapturePanel();
+  }
   btnMinimize.dataset.tip = minimized ? "Expand" : "Minimize";
   btnMinimize.setAttribute(
     "aria-label",
@@ -414,6 +673,189 @@ function routeFiles(fileList) {
 
 // One smart button: routeFiles sniffs audio vs .lrc/.txt and dispatches.
 btnLoad.addEventListener("click", () => fileInput.click());
+
+// ── Live audio capture (tab share OR system input device) ───────────────
+function syncCaptureUI() {
+  const on = audio.captureMode;
+  btnCapture.setAttribute("aria-pressed", on ? "true" : "false");
+  btnCapture.dataset.tip = on ? "Stop capture" : "Capture tab/system audio";
+  // Capture is shown only as a faint top-left icon. The transport title is
+  // reserved for real metadata (bridge track or loaded file), never overwritten
+  // with "Live capture".
+  captureIndicator.classList.toggle("active", on);
+}
+
+function closeCapturePanel() {
+  capturePanel.hidden = true;
+  btnCapture.setAttribute("aria-expanded", "false");
+}
+
+// True when the page's Permissions-Policy forbids the microphone (e.g. the
+// here.now host sends `microphone=()`). Then getUserMedia can't work at all and
+// device enumeration is pointless — steer to tab-share or the local bridge.
+function micPolicyBlocked() {
+  try {
+    const fp = document.featurePolicy;
+    if (fp && typeof fp.allowsFeature === "function") {
+      return !fp.allowsFeature("microphone");
+    }
+  } catch {}
+  return false;
+}
+
+function reportCaptureError(err) {
+  if (err && err.name === "NotAllowedError") {
+    updateLyricsStatus(
+      micPolicyBlocked()
+        ? "This host blocks the mic — use tab share or the local bridge"
+        : "Capture permission denied",
+    );
+  } else if (err && err.message === "NO_AUDIO") {
+    updateLyricsStatus("No audio in that source — tick 'Share tab audio'");
+  } else if (!window.isSecureContext) {
+    updateLyricsStatus("Capture needs https or localhost");
+  } else if (err && err.name === "NotFoundError") {
+    updateLyricsStatus("That input device is unavailable");
+  } else {
+    updateLyricsStatus("Capture failed");
+  }
+}
+
+// A device is a "system loopback" if it monitors an output sink. Linux
+// PipeWire/Pulse expose these as "Monitor of …"; macOS uses BlackHole/Loopback;
+// Windows uses Stereo Mix / VB-Cable. These carry native-app audio.
+function isSystemLoopback(label) {
+  return /monitor|loopback|stereo mix|blackhole|vb-?cable|cable output|what u hear/i.test(
+    label || "",
+  );
+}
+
+async function startCaptureSource(fn) {
+  closeCapturePanel();
+  btnCapture.disabled = true;
+  try {
+    await fn();
+    if (!bridge.active) {
+      updateLyricsStatus("Visualizing captured audio · lyrics off");
+    }
+  } catch (err) {
+    reportCaptureError(err);
+  } finally {
+    btnCapture.disabled = false;
+    syncCaptureUI();
+  }
+}
+
+function makeCaptureItem({ title, sub, system, onClick }) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "cap-item" + (system ? " cap-system" : "");
+  const t = document.createElement("span");
+  t.textContent = title;
+  btn.appendChild(t);
+  if (sub) {
+    const s = document.createElement("span");
+    s.className = "cap-sub";
+    s.textContent = sub;
+    btn.appendChild(s);
+  }
+  btn.addEventListener("click", onClick);
+  return btn;
+}
+
+async function openCapturePanel() {
+  capList.replaceChildren();
+  capHint.textContent = "";
+  capturePanel.hidden = false;
+  btnCapture.setAttribute("aria-expanded", "true");
+
+  // Best path when the bridge is serving us on Linux: it taps the system
+  // output monitor directly, so ALL native-app audio is captured regardless of
+  // what the browser will or won't enumerate.
+  if (bridge.active && bridge.audioStream) {
+    capList.appendChild(
+      makeCaptureItem({
+        title: "System output (bridge)",
+        sub: "all apps · monitor of default output",
+        system: true,
+        onClick: () => startCaptureSource(() => audio.startBridgeStream()),
+      }),
+    );
+  }
+
+  // Tab/window share is always available (browser tabs only on most setups).
+  capList.appendChild(
+    makeCaptureItem({
+      title: "Browser tab / window",
+      sub: "pick a surface · tick “Share tab audio”",
+      onClick: () => startCaptureSource(() => audio.startCapture()),
+    }),
+  );
+
+  // If the host blocks the microphone via Permissions-Policy, getUserMedia is
+  // dead on arrival — don't offer it; explain the working alternatives instead.
+  if (micPolicyBlocked()) {
+    capHint.textContent = bridge.active
+      ? "Mic blocked by host. Use “System output (bridge)” above for native-app audio."
+      : "This host blocks microphone access, so input devices aren't available. Use “Browser tab / window” above, or run the local bridge (npm run bridge) for full system audio.";
+    return;
+  }
+
+  // Listing input devices forces a mic-permission prompt and only surfaces
+  // monitors the browser bothers to expose — so it's opt-in, not automatic.
+  const moreBtn = makeCaptureItem({
+    title: "Input devices…",
+    sub: "monitors / line-in (needs mic permission)",
+    onClick: async () => {
+      moreBtn.remove();
+      let devices = [];
+      try {
+        await audio.ensureInputPermission();
+        devices = await audio.listInputDevices();
+      } catch {
+        capHint.textContent = "Microphone access denied — can't list devices.";
+        return;
+      }
+      const loopbacks = devices.filter((d) => isSystemLoopback(d.label));
+      const others = devices.filter((d) => !isSystemLoopback(d.label));
+      for (const d of [...loopbacks, ...others]) {
+        const system = isSystemLoopback(d.label);
+        capList.appendChild(
+          makeCaptureItem({
+            title: d.label || (system ? "System monitor" : "Audio input"),
+            sub: system ? "system audio · native apps" : "input device",
+            system,
+            onClick: () =>
+              startCaptureSource(() => audio.startDeviceCapture(d.deviceId)),
+          }),
+        );
+      }
+      if (!loopbacks.length) {
+        capHint.textContent =
+          "No monitor exposed by the browser. Linux: use “System output (bridge)” above. macOS: install BlackHole. Windows: enable Stereo Mix / VB-Cable.";
+      }
+    },
+  });
+  capList.appendChild(moreBtn);
+}
+
+btnCapture.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (audio.captureMode) {
+    audio.stopCapture();
+    updateLyricsStatus("Capture stopped");
+    closeCapturePanel();
+    return;
+  }
+  if (capturePanel.hidden) openCapturePanel();
+  else closeCapturePanel();
+});
+
+capturePanel.addEventListener("click", (e) => e.stopPropagation());
+document.addEventListener("click", () => closeCapturePanel());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !capturePanel.hidden) closeCapturePanel();
+});
 
 fileInput.addEventListener("change", (event) => {
   routeFiles(event.currentTarget.files);
@@ -870,16 +1312,21 @@ const LINEBED_COLS = 84;
 const LINEBED_BG = "#0a0a0f";
 let linebedHistory = []; // newest at index 0; each entry a Float32Array(LINEBED_COLS)
 let linebedAccum = 0;
+let linebedPrevRow = null; // last pre-velocity baseline, for transient boost
 
 function midiToFreq(midi) {
   return 440 * Math.pow(2, (midi - 69) / 12);
 }
 
-function pushLinebedRow(metrics) {
+function pushLinebedRow(metrics, params) {
   const freq = metrics.frequencyData;
   const sr = metrics.sampleRate || 44100;
   const binFreq = sr / 2 / freq.length; // Hz per bin
-  const row = new Float32Array(LINEBED_COLS);
+  const gate = params.gate;
+  const gamma = params.contrast;
+  const velocity = params.velocity;
+  const base = new Float32Array(LINEBED_COLS); // post-gate/gamma, pre-velocity
+  const row = new Float32Array(LINEBED_COLS); // what we store/draw
 
   for (let c = 0; c < LINEBED_COLS; c++) {
     const midi = LINEBED_START_MIDI + c;
@@ -899,10 +1346,26 @@ function pushLinebedRow(metrics) {
       if (v > peak) peak = v;
     }
     // Peak-weighted: emphasise the dominant pitch so intonation reads, with a
-    // little averaging for body. Light power curve keeps dynamics intact.
-    const val = (peak * 0.7 + (sum / (hi - lo)) * 0.3) / 255;
-    row[c] = Math.min(1, Math.pow(val, 0.85));
+    // little averaging for body.
+    let val = (peak * 0.72 + (sum / (hi - lo)) * 0.28) / 255;
+    // Gate: lift the noise floor away so quiet passages read as flat silence
+    // instead of constant sea-wave ripple.
+    if (gate > 0) val = val > gate ? (val - gate) / (1 - gate) : 0;
+    // Contrast: gamma separates loud from quiet (>1 spikes dynamics).
+    base[c] = Math.min(1, Math.pow(val, gamma));
   }
+
+  for (let c = 0; c < LINEBED_COLS; c++) {
+    let v = base[c];
+    // Velocity: a column rising vs the previous snapshot punches taller, so
+    // attacks and onsets are visible rather than smoothed away.
+    if (velocity > 0 && linebedPrevRow) {
+      const d = base[c] - linebedPrevRow[c];
+      if (d > 0) v = Math.min(1, v + d * velocity * 1.6);
+    }
+    row[c] = v;
+  }
+  linebedPrevRow = base;
 
   linebedHistory.unshift(row);
   if (linebedHistory.length > LINEBED_ROWS)
@@ -910,16 +1373,17 @@ function pushLinebedRow(metrics) {
 }
 
 function drawLinebed(metrics, w, h, time, dt) {
+  const params = getLinebedParams();
   // Advance the scroll at a fixed cadence so it's frame-rate independent.
   linebedAccum += dt;
   const stepInterval = 1 / 50;
   let pushed = 0;
   while (linebedAccum >= stepInterval && pushed < 4) {
-    pushLinebedRow(metrics);
+    pushLinebedRow(metrics, params);
     linebedAccum -= stepInterval;
     pushed++;
   }
-  if (linebedHistory.length === 0) pushLinebedRow(metrics);
+  if (linebedHistory.length === 0) pushLinebedRow(metrics, params);
 
   const rows = linebedHistory.length;
   const cx = w / 2;
@@ -931,13 +1395,26 @@ function drawLinebed(metrics, w, h, time, dt) {
   const yNear = Math.min(h * 1.0, h - reserved);
   const wNear = w * 1.12; // bleed past the edges so the front fills the screen
   const wFar = w * 0.52;
-  const ampNear = h * 0.17;
-  const ampFar = h * 0.085;
+  const ampNear = h * 0.17 * params.amplitude;
+  const ampFar = h * 0.085 * params.amplitude;
+  // Thinner ridges on narrow/mobile screens — full-weight lines crowd the
+  // smaller field and read as heavy. Taper down toward phones.
+  const lineScale = w >= 900 ? 1 : w <= 420 ? 0.6 : 0.6 + ((w - 420) / 480) * 0.4;
 
-  // Draw far→near (index 0 newest = far/top) so nearer fills occlude the rest.
-  for (let i = 0; i < rows; i++) {
+  // Always draw far→near so nearer fills occlude the rows behind them.
+  // flip = newest row sits near/bottom (the present moment is the front line);
+  // otherwise newest enters far/top and scrolls down.
+  const flip = params.flip !== false;
+  for (let k = 0; k < rows; k++) {
+    const i = flip ? rows - 1 - k : k; // history index, oldest→newest draw order
     const row = linebedHistory[i];
-    const d = rows <= 1 ? 1 : 1 - i / (rows - 1); // 1 = far/top, 0 = near/bottom
+    const age = i; // 0 = newest
+    const d =
+      rows <= 1
+        ? 1
+        : flip
+          ? age / (rows - 1) // newest(age 0) → near/bottom
+          : 1 - age / (rows - 1); // newest(age 0) → far/top
     const yBase = yNear + (yFar - yNear) * d;
     const rowW = wNear + (wFar - wNear) * d;
     const amp = ampNear + (ampFar - ampNear) * d;
@@ -967,7 +1444,7 @@ function drawLinebed(metrics, w, h, time, dt) {
     ctx.beginPath();
     trace();
     ctx.strokeStyle = `rgba(234, 238, 247, ${0.16 + nearness * 0.66})`;
-    ctx.lineWidth = 1 + nearness * 0.7;
+    ctx.lineWidth = (1 + nearness * 0.7) * lineScale;
     ctx.stroke();
   }
 }
@@ -1095,9 +1572,9 @@ function getWordMotionState({
     lineArc -
     spread * (7 + wordEnergy * 10) +
     release * (8 + edgeBias * 10) +
-    Math.sin(time * 4.5 + wordIdx * 0.9 + lineIdx * 0.45) * shimmer * 4;
+    Math.sin(time * 3.0 + wordIdx * 0.9 + lineIdx * 0.45) * shimmer * 2.2;
   const offsetX =
-    Math.sin(time * 2.4 + wordIdx * 0.55 + lineIdx * 0.2) * shimmer * 1.8;
+    Math.sin(time * 1.8 + wordIdx * 0.55 + lineIdx * 0.2) * shimmer * 1.0;
 
   const scaleX = clamp(
     1 +
@@ -1118,7 +1595,7 @@ function getWordMotionState({
 
   const rotation =
     position * (spread * 0.04 - release * 0.03) +
-    Math.sin(time * 3.2 + wordIdx) * shimmer * 0.02;
+    Math.sin(time * 2.2 + wordIdx) * shimmer * 0.012;
   const alpha =
     reveal * clamp(0.84 + beat.impact * 0.16 + shimmer * 0.06, 0, 1);
   const glow = 6 + beat.impact * 10 + shimmer * 12 + wordEnergy * 6;
@@ -1169,7 +1646,9 @@ function getContourSample({
     const ripple =
       Math.sin(p * Math.PI * 9 + time * 8.4 + lineIdx * 1.2) * rippleAmplitude;
     const sway = Math.sin(time * 1.6 + lineIdx * 0.7) * lineBias;
-    return arch + wave + ripple + sway;
+    // arch is the static silhouette; the time-varying parts scale with the
+    // user's lyric-motion setting (0 = calm, readable).
+    return arch + (wave + ripple + sway) * lyricMotion;
   };
 
   const deltaT = clamp(18 / Math.max(totalWidth, 1), 0.008, 0.03);
@@ -1192,7 +1671,7 @@ function getContourSample({
 }
 
 function drawLyrics(metrics, w, h, time) {
-  const currentTime = getPlaybackTime();
+  const currentTime = getLyricTime();
   const lyric = getCurrentLyric(lyrics, currentTime);
   const progress = getLyricProgress(lyrics, currentTime);
 
@@ -1216,13 +1695,15 @@ function drawLyrics(metrics, w, h, time) {
 
   const palette = palettes[Math.floor(time / 15) % palettes.length];
 
-  // Dynamic font sizing — bass makes text physically larger
-  const baseFontSize = Math.min(w, h) * 0.06;
+  // Dynamic font sizing — user scale, then a beat pump (scaled by motion).
+  const fontDef = LYRIC_FONTS[lyricFontKey] || LYRIC_FONTS.sans;
+  const baseFontSize = Math.min(w, h) * 0.06 * lyricFontScale;
   const emphasisScale = lyric.emphasis ? 1.2 : 1;
-  const beatPump = 1 + beat.impact * 0.12 + beat.pressure * 0.08;
+  const beatPump = 1 + (beat.impact * 0.12 + beat.pressure * 0.08) * lyricMotion;
   const fontSize = Math.round(baseFontSize * emphasisScale * beatPump);
-  const font = `${lyric.emphasis ? "800" : "600"} ${fontSize}px Inter`;
-  const maxWidth = w * 0.78;
+  const weight = lyric.emphasis ? fontDef.emphasisWeight : fontDef.weight;
+  const font = `${weight} ${fontSize}px ${fontDef.family}`;
+  const maxWidth = w * 0.72;
   const lineHeight = fontSize * 1.35;
 
   // Use pretext for line layout
@@ -1297,12 +1778,8 @@ function drawLyrics(metrics, w, h, time) {
     let seenWords = 0;
     const tokenStates = tokens.map((token) => {
       if (token.isSpace) {
-        return {
-          ...token,
-          reserveWidth:
-            token.baseWidth *
-            clamp(1 + beat.surge * 0.24 - beat.pressure * 0.08, 0.78, 1.55),
-        };
+        // Static width — no per-frame beat term, so the line never reflows.
+        return { ...token, reserveWidth: token.baseWidth };
       }
 
       const wordIdx = seenWords++;
@@ -1333,43 +1810,54 @@ function drawLyrics(metrics, w, h, time) {
       const position =
         tokenCount <= 1 ? 0 : (wordIdx / (tokenCount - 1)) * 2 - 1;
       const edgeBias = Math.abs(position);
-      const dropHeight =
+      let dropHeight =
         (1 - settle) * (78 + beat.surge * 56 + wordEnergy * 26 + edgeBias * 12);
-      const bounce =
+      let bounce =
         beat.bassBeat * clamp(phase * 1.25, 0, 1) * (8 + wordEnergy * 10);
+      // Effect shaping: only the default wordwave drops/bounces per word.
+      // reveal = calm left-to-right wipe; fade = whole line eases in together.
+      let revealAlpha = clamp(phase * 1.35, 0, 1);
+      const calmFactor = lyricEffect === "wordwave" ? 1 : 0.35;
+      if (lyricEffect !== "wordwave") {
+        dropHeight = 0;
+        bounce = 0;
+      }
+      if (lyricEffect === "fade") revealAlpha = clamp(lineReveal * 1.1, 0, 1);
       const swingX =
         position *
         (motion.spread * (18 + edgeBias * 12) - motion.compression * 6);
       const rippleX =
-        Math.sin(time * 4.6 + wordIdx * 0.8 + lineIdx * 0.35) *
-        (motion.shimmer * 2.8 + wordEnergy * 1.8);
+        Math.sin(time * 3.0 + wordIdx * 0.8 + lineIdx * 0.35) *
+        (motion.shimmer * 1.2 + wordEnergy * 0.8);
       const scaleX = clamp(
-        1 + motion.spread * 0.1 + beat.splitPulse * 0.08 + wordEnergy * 0.06,
+        1 +
+          (motion.spread * 0.1 + beat.splitPulse * 0.08 + wordEnergy * 0.06) *
+            lyricMotion,
         0.92,
         1.38,
       );
       const scaleY = clamp(
         1 +
-          (1 - clamp(phase, 0, 1)) * 0.18 -
-          beat.splitPulse * 0.035 +
-          motion.release * 0.05,
+          ((1 - clamp(phase, 0, 1)) * 0.18 -
+            beat.splitPulse * 0.035 +
+            motion.release * 0.05) *
+            lyricMotion,
         0.9,
         1.34,
       );
       const rotation =
-        motion.rotation * 1.2 +
-        lineTilt * position +
-        (1 - clamp(phase, 0, 1)) * position * 0.18 +
-        Math.sin(time * 3 + wordIdx * 0.8) * motion.shimmer * 0.03;
-      const offsetX = motion.offsetX * 0.55 + swingX + rippleX;
-      const offsetY = lineLift + motion.offsetY * 0.5 - dropHeight + bounce;
-      const reserveWidth =
-        token.baseWidth *
-          clamp(1 + motion.spread * 0.1 + wordEnergy * 0.04, 0.98, 1.24) +
-        16 +
-        beat.impact * 10 +
-        Math.abs(swingX) * 0.35 +
-        beat.splitPulse * (10 + wordEnergy * 8);
+        (motion.rotation * 1.2 +
+          lineTilt * position +
+          (1 - clamp(phase, 0, 1)) * position * 0.18 +
+          Math.sin(time * 2 + wordIdx * 0.8) * motion.shimmer * 0.015) *
+        lyricMotion *
+        calmFactor;
+      const offsetX =
+        (motion.offsetX * 0.55 + swingX + rippleX) * lyricMotion * calmFactor;
+      const offsetY =
+        (lineLift + motion.offsetY * 0.5 - dropHeight + bounce) * lyricMotion;
+      // Static reserve width (baseWidth + fixed pad) → stable line, no reflow.
+      const reserveWidth = token.baseWidth + 14;
 
       return {
         ...token,
@@ -1384,7 +1872,7 @@ function drawLyrics(metrics, w, h, time) {
         offsetX,
         offsetY,
         rotation,
-        alpha: clamp(phase * 1.35, 0, 1) * (0.84 + beat.impact * 0.16),
+        alpha: revealAlpha * (0.84 + beat.impact * 0.16 * lyricMotion),
         glow: motion.glow + wordEnergy * 10,
         position,
       };
@@ -1394,14 +1882,21 @@ function drawLyrics(metrics, w, h, time) {
       (sum, state) => sum + state.reserveWidth,
       0,
     );
-    const lineStartX = (w - totalTokenWidth) / 2;
+    // Shrink-to-fit: keep the whole line inside a visible side margin so the
+    // first/last words never run off-screen. Gutter ≈8%, capped at 10%.
+    const margin = Math.min(w * 0.1, Math.max(24, w * 0.08));
+    const safeWidth = w - margin * 2;
+    const fit = totalTokenWidth > safeWidth ? safeWidth / totalTokenWidth : 1;
+    const lineStartX = (w - totalTokenWidth * fit) / 2;
     let cursorX = lineStartX;
 
     for (let tokenIdx = 0; tokenIdx < tokenStates.length; tokenIdx++) {
       const state = tokenStates[tokenIdx];
-      const tokenBaseX = cursorX + state.reserveWidth / 2;
+      const tokenBaseX = cursorX + (state.reserveWidth * fit) / 2;
       const curveT =
-        totalTokenWidth > 0 ? (tokenBaseX - lineStartX) / totalTokenWidth : 0.5;
+        totalTokenWidth > 0
+          ? (tokenBaseX - lineStartX) / (totalTokenWidth * fit)
+          : 0.5;
       const contour = getContourSample({
         t: curveT,
         lineIdx,
@@ -1421,15 +1916,20 @@ function drawLyrics(metrics, w, h, time) {
         const splitStrength =
           beat.splitPulse *
           (0.4 + state.energy * 0.9) *
-          (0.55 + Math.abs(state.position) * 0.85);
+          (0.55 + Math.abs(state.position) * 0.85) *
+          lyricMotion;
         const splitNormal = splitStrength * (12 + state.energy * 18);
         const splitTangent =
           splitDirection * splitStrength * (10 + Math.abs(state.position) * 14);
-        const drawX =
+        const drawX = clamp(
           tokenBaseX +
-          state.offsetX +
-          contour.normalX * splitNormal +
-          contour.tangentX * splitTangent;
+            (state.offsetX +
+              contour.normalX * splitNormal +
+              contour.tangentX * splitTangent) *
+              fit,
+          margin,
+          w - margin,
+        );
         const drawY =
           lineY +
           contour.y +
@@ -1439,7 +1939,7 @@ function drawLyrics(metrics, w, h, time) {
         const drawRotation =
           contour.angle * 0.88 +
           state.rotation +
-          splitDirection * beat.splitPulse * 0.06;
+          splitDirection * beat.splitPulse * 0.06 * lyricMotion;
 
         const colorIdx = (state.wordIdx + lineIdx * 2) % palette.length;
         const colorBase = palette[colorIdx];
@@ -1466,8 +1966,8 @@ function drawLyrics(metrics, w, h, time) {
         ctx.translate(drawX, drawY + fontSize / 2);
         ctx.rotate(drawRotation);
         ctx.scale(
-          state.scaleX + beat.splitPulse * 0.12 + state.energy * 0.05,
-          state.scaleY - beat.splitPulse * 0.04 + state.energy * 0.03,
+          state.scaleX + (beat.splitPulse * 0.12 + state.energy * 0.05) * lyricMotion,
+          state.scaleY + (-beat.splitPulse * 0.04 + state.energy * 0.03) * lyricMotion,
         );
         ctx.globalAlpha = state.alpha;
         ctx.font = font;
@@ -1496,7 +1996,7 @@ function drawLyrics(metrics, w, h, time) {
         }
       }
 
-      cursorX += state.reserveWidth;
+      cursorX += state.reserveWidth * fit;
     }
 
     globalWordBase += tokenCount;
@@ -1505,7 +2005,7 @@ function drawLyrics(metrics, w, h, time) {
 
 // ── Context lyrics ─────────────────────────────────────────────────────
 function drawContextLyrics(metrics, w, h, time) {
-  const currentTime = getPlaybackTime();
+  const currentTime = getLyricTime();
   const fontSize = Math.min(w, h) * 0.02;
   const font = `300 ${Math.round(fontSize)}px Inter`;
   const lineHeight = fontSize * 1.6;
@@ -1542,7 +2042,8 @@ function drawContextLyrics(metrics, w, h, time) {
         centerY + offset * 55 + (offset < 0 ? -85 : 85) + i * lineHeight;
 
       // Subtle audio reactivity on context lines too
-      const wobble = Math.sin(time * 1.5 + offset * 2) * metrics.mid * 3;
+      const wobble =
+        Math.sin(time * 1.5 + offset * 2) * metrics.mid * 3 * lyricMotion;
 
       ctx.save();
       ctx.globalAlpha = alpha + metrics.overall * 0.05;
@@ -1616,8 +2117,12 @@ function render(timestamp) {
     drawFrequencyBars(metrics, w, h, fakeTime);
     drawWaveform(metrics, w, h, fakeTime);
   }
-  drawContextLyrics(metrics, w, h, fakeTime);
-  drawLyrics(metrics, w, h, fakeTime);
+  // Draw lyrics when we have a timeline: file playback, or the bridge feeding
+  // a system track position. Pure capture (no bridge) has no timeline → skip.
+  if (!audio.captureMode || bridge.active) {
+    drawContextLyrics(metrics, w, h, fakeTime);
+    drawLyrics(metrics, w, h, fakeTime);
+  }
   updateParticles();
   drawParticles();
   syncProgressUI();
@@ -1658,3 +2163,47 @@ function startLoop() {
 startLoop();
 syncPlaybackControls();
 updateLyricsStatus("Load an audio file to begin");
+
+// ── Now-Playing bridge: system metadata + lrclib lyrics ─────────────────
+function bridgeLabel(track) {
+  return track.artist ? `${track.artist} — ${track.title}` : track.title;
+}
+
+function initBridge() {
+  bridge.onTrack = (track) => {
+    if (!track.title) return;
+    const version = ++bridgeVersion;
+    const label = bridgeLabel(track);
+    nowPlaying.textContent = label;
+    setLyricsState(EMPTY_LYRICS);
+    updateLyricsStatus(`${label} · fetching lyrics…`);
+    fetchLyrics({
+      title: track.title,
+      artist: track.artist,
+      album: track.album,
+      audioDuration: track.length || undefined,
+    })
+      .then((fetched) => {
+        if (version !== bridgeVersion) return; // track changed mid-fetch
+        if (fetched && fetched.lyrics.length > 0) {
+          setLyricsState(fetched.lyrics);
+          const lines = fetched.lyrics.filter((l) => l.text).length;
+          updateLyricsStatus(`${label} · ${lines} lines (lrclib)`);
+        } else {
+          updateLyricsStatus(`${label} · no lyrics found`);
+        }
+      })
+      .catch(() => {
+        if (version === bridgeVersion) {
+          updateLyricsStatus(`${label} · lyrics fetch failed`);
+        }
+      });
+  };
+  bridge.start().then((reachable) => {
+    if (reachable && !bridge.track) {
+      updateLyricsStatus("Bridge connected · waiting for a track…");
+    }
+  });
+}
+
+initBridge();

@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Skyfall Visualizer</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&family=Playfair+Display:wght@600;800&family=Dancing+Script:wght@600;700&display=swap');
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -27,6 +27,41 @@
       width: 100%;
       height: 100%;
       z-index: 0;
+    }
+
+    #capture-indicator {
+      position: fixed;
+      top: 18px;
+      left: 18px;
+      width: 24px;
+      height: 24px;
+      z-index: 20;
+      color: rgba(255, 255, 255, 0.5);
+      filter: drop-shadow(0 2px 7px rgba(0, 0, 0, 0.7));
+      opacity: 0;
+      transition: opacity 0.35s ease;
+      pointer-events: none;
+    }
+
+    #capture-indicator.active {
+      opacity: 0.45;
+      animation: capture-pulse 2.4s ease-in-out infinite;
+    }
+
+    #capture-indicator svg {
+      width: 100%;
+      height: 100%;
+      fill: currentColor;
+      display: block;
+    }
+
+    @keyframes capture-pulse {
+      0%, 100% { opacity: 0.28; }
+      50% { opacity: 0.5; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #capture-indicator.active { animation: none; }
     }
 
     .controls {
@@ -236,9 +271,63 @@
     .transport-shell.minimized .lyrics-status,
     .transport-shell.minimized .seek-bar,
     .transport-shell.minimized .time-row,
+    .transport-shell.minimized ~ #capture-panel,
+    .transport-shell.minimized ~ #motion-panel,
     .transport-shell.minimized #btn-viz,
+    .transport-shell.minimized #btn-linebed,
+    .transport-shell.minimized #btn-motion,
+    .transport-shell.minimized #btn-capture,
     .transport-shell.minimized #btn-load {
       display: none;
+    }
+
+    #btn-capture[aria-pressed="true"] {
+      background: rgba(255, 95, 95, 0.22);
+      border-color: rgba(255, 95, 95, 0.7);
+      color: #ffb3b3;
+    }
+
+    .cap-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      max-height: 240px;
+      overflow-y: auto;
+    }
+
+    .cap-item {
+      width: 100%;
+      min-width: 0;
+      text-align: left;
+      padding: 9px 11px;
+      font-size: 12px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+      line-height: 1.3;
+    }
+
+    .cap-item .cap-sub {
+      font-size: 10px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.04em;
+      opacity: 0.55;
+    }
+
+    .cap-item.cap-system {
+      background: rgba(110, 200, 255, 0.14);
+      border-color: rgba(110, 200, 255, 0.5);
+    }
+
+    .cap-hint {
+      font-size: 10px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.03em;
+      line-height: 1.45;
+      opacity: 0.5;
     }
 
     .transport-shell.minimized .icon-chevron {
@@ -247,6 +336,154 @@
 
     @media (prefers-reduced-motion: reduce) {
       .icon-chevron { transition: none; }
+    }
+
+    /* Linebed preset popover */
+    .linebed-panel {
+      position: absolute;
+      bottom: calc(100% + 14px);
+      left: 50%;
+      transform: translateX(-50%) translateY(6px);
+      width: min(300px, calc(100vw - 32px));
+      padding: 16px 18px 18px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 18px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+        rgba(9, 9, 14, 0.82);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+      backdrop-filter: blur(18px);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.18s ease, transform 0.18s cubic-bezier(0.22, 1, 0.36, 1);
+      z-index: 30;
+    }
+
+    .linebed-panel:not([hidden]) {
+      opacity: 1;
+      pointer-events: auto;
+      transform: translateX(-50%) translateY(0);
+    }
+
+    .lb-title {
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      opacity: 0.5;
+    }
+
+    .lb-presets {
+      display: flex;
+      gap: 6px;
+    }
+
+    .lb-preset {
+      flex: 1;
+      min-width: 0;
+      padding: 8px 4px;
+      font-size: 12px;
+      border-radius: 9px;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+    }
+
+    .lb-preset[aria-checked="true"] {
+      background: rgba(255, 167, 62, 0.22);
+      border-color: rgba(255, 167, 62, 0.7);
+      color: #ffd9a8;
+    }
+
+    .lb-sliders {
+      display: flex;
+      flex-direction: column;
+      gap: 11px;
+    }
+
+    .lb-sliders.disabled {
+      opacity: 0.32;
+      pointer-events: none;
+    }
+
+    .lb-slider {
+      display: grid;
+      grid-template-columns: 72px 1fr;
+      align-items: center;
+      gap: 10px;
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.04em;
+      opacity: 0.85;
+    }
+
+    .lb-slider input[type="range"] {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 100%;
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.16);
+      outline: none;
+      cursor: pointer;
+    }
+
+    .lb-slider input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 14px;
+      height: 14px;
+      border: 0;
+      border-radius: 50%;
+      background: #ffb347;
+      box-shadow: 0 0 0 4px rgba(255, 167, 62, 0.18);
+    }
+
+    .lb-slider input[type="range"]::-moz-range-thumb {
+      width: 14px;
+      height: 14px;
+      border: 0;
+      border-radius: 50%;
+      background: #ffb347;
+    }
+
+    .lb-select {
+      width: 100%;
+      min-width: 0;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.03em;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 9px;
+      cursor: pointer;
+      appearance: none;
+    }
+
+    .lb-select:focus { outline: none; border-color: rgba(255, 167, 62, 0.6); }
+    .lb-select option { background: #14141b; color: #fff; }
+
+    .lb-flip {
+      min-width: 0;
+      width: 100%;
+      padding: 7px 8px;
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.04em;
+      border-radius: 9px;
+      background: rgba(255, 167, 62, 0.18);
+      border: 1px solid rgba(255, 167, 62, 0.55);
+      color: #ffd9a8;
+    }
+
+    .lb-flip[aria-checked="false"] {
+      background: rgba(255, 255, 255, 0.06);
+      border-color: rgba(255, 255, 255, 0.12);
+      color: rgba(255, 255, 255, 0.7);
     }
 
     .now-playing {
@@ -333,7 +570,73 @@
 <body>
   <canvas id="viz-canvas"></canvas>
 
+  <!-- Faint, shadowed "capturing" indicator, top-left. Just a quiet hint that
+       live audio capture is on — metadata/title lives in the transport. -->
+  <div id="capture-indicator" aria-hidden="true" title="Capturing live audio">
+    <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm7 9a7 7 0 0 1-6 6.92V22h-2v-3.08A7 7 0 0 1 5 12h2a5 5 0 0 0 10 0h2z" /></svg>
+  </div>
+
   <div class="controls">
+    <div id="linebed-panel" class="linebed-panel" role="dialog" aria-label="Linebed presets" hidden>
+      <div class="lb-title">Linebed</div>
+      <div class="lb-presets" role="radiogroup" aria-label="Preset">
+        <button class="lb-preset" type="button" role="radio" data-preset="smooth" aria-checked="false">Smooth</button>
+        <button class="lb-preset" type="button" role="radio" data-preset="dynamic" aria-checked="false">Dynamic</button>
+        <button class="lb-preset" type="button" role="radio" data-preset="custom" aria-checked="false">Custom</button>
+      </div>
+      <div class="lb-sliders" id="lb-sliders">
+        <label class="lb-slider"><span>Amplitude</span>
+          <input type="range" id="lb-amplitude" min="0.4" max="2.6" step="0.05" />
+        </label>
+        <label class="lb-slider"><span>Contrast</span>
+          <input type="range" id="lb-contrast" min="0.5" max="2.6" step="0.05" />
+        </label>
+        <label class="lb-slider"><span>Velocity</span>
+          <input type="range" id="lb-velocity" min="0" max="1.6" step="0.05" />
+        </label>
+        <label class="lb-slider"><span>Gate</span>
+          <input type="range" id="lb-gate" min="0" max="0.4" step="0.01" />
+        </label>
+        <div class="lb-slider"><span>Flip Y</span>
+          <button type="button" id="lb-flip" class="lb-flip" role="switch" aria-checked="true">Newest at bottom</button>
+        </div>
+      </div>
+    </div>
+    <div id="capture-panel" class="linebed-panel capture-panel" role="dialog" aria-label="Audio capture source" hidden>
+      <div class="lb-title">Capture source</div>
+      <div class="cap-list" id="cap-list"></div>
+      <div class="cap-hint" id="cap-hint"></div>
+    </div>
+    <div id="motion-panel" class="linebed-panel" role="dialog" aria-label="Lyrics" hidden>
+      <div class="lb-title">Lyrics</div>
+      <div class="lb-sliders">
+        <label class="lb-slider"><span>Font</span>
+          <select id="lm-font" class="lb-select">
+            <option value="sans">Sans</option>
+            <option value="serif">Serif</option>
+            <option value="cursive">Cursive</option>
+            <option value="mono">Mono</option>
+          </select>
+        </label>
+        <label class="lb-slider"><span id="lm-size-label">Size</span>
+          <input type="range" id="lm-size" min="0.6" max="1.6" step="0.05" />
+        </label>
+        <label class="lb-slider"><span>Effect</span>
+          <select id="lm-effect" class="lb-select">
+            <option value="wordwave">Word wave</option>
+            <option value="reveal">Reveal (L→R)</option>
+            <option value="fade">Fade in</option>
+          </select>
+        </label>
+        <label class="lb-slider"><span id="lm-label">Motion</span>
+          <input type="range" id="lm-motion" min="0" max="1.4" step="0.05" />
+        </label>
+        <label class="lb-slider"><span id="lm-offset-label">Offset</span>
+          <input type="range" id="lm-offset" min="-3" max="3" step="0.1" />
+        </label>
+      </div>
+      <div class="cap-hint">Motion 0% = still text. Offset nudges lyric sync. Reveal suits Cursive.</div>
+    </div>
     <div class="transport-shell">
       <span class="now-playing" id="now-playing"></span>
       <span class="lyrics-status" id="lyrics-status" aria-live="polite"></span>
@@ -356,6 +659,12 @@
         <button id="btn-viz" class="icon-btn" type="button" aria-label="Visualizer" data-tip="Visualizer">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 13h3v7H4zM10.5 4h3v16h-3zM17 9h3v11h-3z" /></svg>
         </button>
+        <button id="btn-motion" class="icon-btn" type="button" aria-label="Lyrics motion" data-tip="Lyrics motion" aria-haspopup="true" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12h4l2-7 4 14 2.5-9 1.8 4H22v2h-6.4l-1.3-2.9-2.7 9.4-4-14L6.6 14H2z" /></svg>
+        </button>
+        <button id="btn-linebed" class="icon-btn" type="button" aria-label="Linebed presets" data-tip="Linebed presets" aria-haspopup="true" aria-expanded="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7h11a3 3 0 0 1 6 0h1v2h-1a3 3 0 0 1-6 0H3V7zm0 8h2a3 3 0 0 1 6 0h10v2H11a3 3 0 0 1-6 0H3v-2z" /></svg>
+        </button>
         <button id="btn-play" class="icon-btn" type="button" aria-label="Play" data-tip="Play" disabled>
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z" /></svg>
         </button>
@@ -365,6 +674,9 @@
         <button id="btn-load" class="icon-btn" type="button" aria-label="Load audio and/or lyrics" data-tip="Load audio + lyrics">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 16V7.83l-2.59 2.58L7 9l5-5 5 5-1.41 1.41L13 7.83V16h-2zM5 18h14v2H5z" /></svg>
         </button>
+        <button id="btn-capture" class="icon-btn" type="button" aria-label="Capture tab or system audio" data-tip="Capture tab/system audio" aria-pressed="false">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm7 9a7 7 0 0 1-6 6.92V22h-2v-3.08A7 7 0 0 1 5 12h2a5 5 0 0 0 10 0h2z" /></svg>
+        </button>
         <button id="btn-minimize" class="icon-btn" type="button" aria-label="Minimize player" data-tip="Minimize">
           <svg class="icon-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z" /></svg>
         </button>
@@ -372,7 +684,12 @@
     </div>
   </div>
 
-  <input id="file-input" class="visually-hidden" type="file" multiple accept="audio/*,.mp3,.wav,.ogg,.flac,.m4a,.aac,.opus,.weba,.lrc,.txt,text/plain" />
+  <!-- No accept filter. Any accept value that resolves to audio/* (a wildcard
+       OR known audio extensions) makes Android offer Voice Recorder / Photos &
+       Videos source apps instead of the document picker. Omitting accept forces
+       the Files browser on mobile; selected files are still validated by
+       extension in isAudioFile / isLyricFile, so nothing is lost. -->
+  <input id="file-input" class="visually-hidden" type="file" multiple />
 
   <div id="drop-overlay" aria-hidden="true">
     <div class="drop-card">
