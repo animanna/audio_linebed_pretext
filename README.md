@@ -24,6 +24,27 @@ It supports:
 
 The renderer is canvas-first. Audio analysis drives the motion system, while Pretext supplies the text layout foundation that keeps the lyric block stable enough to animate aggressively.
 
+### What this fork adds
+
+This fork goes beyond visualizing files loaded into the page — it reacts to and
+syncs with whatever is playing on the whole system:
+
+- **System audio capture** — a local bridge taps the default output's monitor
+  (Linux `parec`) and streams PCM to the visualizer, so the spectrum reacts to
+  **any native app's audio** (Spotify, Deezer, desktop players — not just tabs).
+  See [System audio capture](#system-audio-capture).
+- **Browser-tab / window capture** — `getDisplayMedia` with "Share tab audio",
+  works in-browser without the bridge.
+- **Now-playing bridge** — reads the OS media session's title / artist / album
+  and exposes it at `GET /api/now-playing`; the app polls it, fetches matching
+  LRCLIB lyrics, and syncs the timeline to the live playback position. See
+  [System "now playing" sync](#system-now-playing-sync-optional).
+- **Cross-platform metadata readers** — **Linux** MPRIS via `playerctl`,
+  **macOS** `nowplaying-cli`, **Windows** SMTC via PowerShell.
+- **Linebed visualizer** — a scrolling, fake-3D chromatic spectrum stack with
+  Smooth / Dynamic / Custom presets, alongside the classic Bars + Wave mode. See
+  [Visualizers](#visualizers).
+
 ## Why Pretext Is Here
 
 Pretext is the core text-layout engine for this project. It is not handling audio playback or lyric fetching. Its job is to make the text layout accurate, deterministic, and cheap enough to manipulate in real time.
