@@ -307,7 +307,9 @@ function showSettingsPage(page) {
 function openSettings(page) {
   syncVizPage();
   syncMotionPanel();
+  syncFftPanel();
   syncLinebedPanel();
+  syncLinebedSpectrumPanel();
   syncLinebedAvailability();
   if (page) showSettingsPage(page);
   settingsPanel.hidden = false;
@@ -361,6 +363,7 @@ const LINEBED_CUSTOM_DEFAULT = { amplitude: 1.55, contrast: 1.9, velocity: 0.95,
 let linebedPreset = "dynamic";
 let linebedCustom = { ...LINEBED_CUSTOM_DEFAULT };
 let linebedOpacity = 0.85; // global ridge opacity, applies across all presets
+let linebedDuration = 1.6; // seconds the row stack spans top→bottom (history depth)
 try {
   const p = localStorage.getItem("linebedPreset");
   if (p && (p === "smooth" || p === "dynamic" || p === "custom")) linebedPreset = p;
@@ -368,6 +371,8 @@ try {
   if (c && typeof c === "object") linebedCustom = { ...LINEBED_CUSTOM_DEFAULT, ...c };
   const o = parseFloat(localStorage.getItem("linebedOpacity"));
   if (Number.isFinite(o)) linebedOpacity = Math.max(0, Math.min(1, o));
+  const d = parseFloat(localStorage.getItem("linebedDuration"));
+  if (Number.isFinite(d)) linebedDuration = Math.max(0.8, Math.min(12, d));
 } catch {}
 
 function getLinebedParams() {
@@ -385,6 +390,8 @@ const lbInputs = {
 };
 const lbFlip = document.getElementById("lb-flip");
 const lbOpacity = document.getElementById("lb-opacity");
+const lbDuration = document.getElementById("lb-duration");
+const lbDurationLabel = document.getElementById("lb-duration-label");
 
 // Renders the Linebed settings page; called by openSettings and on edits.
 function syncLinebedPanel() {
@@ -399,6 +406,8 @@ function syncLinebedPanel() {
   lbFlip.setAttribute("aria-checked", flip ? "true" : "false");
   lbFlip.textContent = flip ? "Newest at bottom" : "Newest at top";
   lbOpacity.value = linebedOpacity;
+  lbDuration.value = linebedDuration;
+  lbDurationLabel.textContent = `History ${linebedDuration.toFixed(1)}s`;
 }
 
 lbPresets.querySelectorAll(".lb-preset").forEach((b) => {
@@ -434,11 +443,101 @@ lbOpacity.addEventListener("input", () => {
   try { localStorage.setItem("linebedOpacity", linebedOpacity); } catch {}
 });
 
+lbDuration.addEventListener("input", () => {
+  linebedDuration = Math.max(0.8, Math.min(12, parseFloat(lbDuration.value)));
+  try { localStorage.setItem("linebedDuration", linebedDuration); } catch {}
+  syncLinebedPanel();
+});
+
 lbFlip.addEventListener("click", () => {
   adoptCustom();
   linebedCustom.flip = !(linebedCustom.flip !== false);
   try { localStorage.setItem("linebedCustom", JSON.stringify(linebedCustom)); } catch {}
   syncLinebedPanel();
+});
+
+// ── Linebed spectrum base (frequency mapping, range, resolution) ─────────
+// Global (not per-preset) controls for how columns map to frequency and how
+// magnitude is scaled. linebedSpectrum + buildLinebedBands live in the draw
+// section; these just edit/persist and rebuild the band table.
+const lsMode = document.getElementById("ls-mode");
+const lsMag = document.getElementById("ls-mag");
+const lsFMin = document.getElementById("ls-fmin");
+const lsFMax = document.getElementById("ls-fmax");
+const lsRange = document.getElementById("ls-range-label");
+const lsRes = document.getElementById("ls-res");
+const lsResLabel = document.getElementById("ls-res-label");
+const lsBlend = document.getElementById("ls-blend");
+const lsBlendLabel = document.getElementById("ls-blend-label");
+
+// Dual-thumb Hz range: two overlaid sliders (low + high handle) over 0..fHi.
+const SPEC_GAP = 50; // min Hz between the two handles
+
+function persistSpectrum() {
+  try { localStorage.setItem("linebedSpectrum", JSON.stringify(linebedSpectrum)); } catch {}
+}
+
+function syncLinebedSpectrumPanel() {
+  const s = linebedSpectrum;
+  lsMode.value = s.mode;
+  lsMag.value = s.mag;
+  lsFMin.value = s.fMin;
+  lsFMax.value = s.fMax;
+  lsRange.textContent = `Range ${Math.round(s.fMin)}–${Math.round(s.fMax)} Hz`;
+  const chromatic = s.mode === "chromatic";
+  lsResLabel.textContent = chromatic ? `Per octave ${s.divPerOctave}` : `Columns ${s.cols}`;
+  lsRes.min = chromatic ? "6" : "16";
+  lsRes.max = chromatic ? "72" : String(LINEBED_SPECTRUM_LIMITS.colsMax);
+  lsRes.step = chromatic ? "1" : "4";
+  lsRes.value = chromatic ? s.divPerOctave : s.cols;
+  lsBlend.value = s.blend;
+  lsBlendLabel.textContent = `Peak↔Avg ${Math.round(s.blend * 100)}%`;
+}
+
+function commitSpectrum() {
+  persistSpectrum();
+  buildLinebedBands();
+  syncLinebedSpectrumPanel();
+}
+
+lsMode.addEventListener("change", () => {
+  if (["chromatic", "log", "linear", "mel"].includes(lsMode.value)) {
+    linebedSpectrum.mode = lsMode.value;
+    commitSpectrum();
+  }
+});
+
+lsMag.addEventListener("change", () => {
+  if (["db", "linear"].includes(lsMag.value)) {
+    linebedSpectrum.mag = lsMag.value;
+    persistSpectrum(); // no rebuild needed; mapping unchanged
+    syncLinebedSpectrumPanel();
+  }
+});
+
+lsFMin.addEventListener("input", () => {
+  const hz = parseFloat(lsFMin.value);
+  linebedSpectrum.fMin = Math.min(hz, linebedSpectrum.fMax - SPEC_GAP);
+  commitSpectrum();
+});
+
+lsFMax.addEventListener("input", () => {
+  const hz = parseFloat(lsFMax.value);
+  linebedSpectrum.fMax = Math.max(hz, linebedSpectrum.fMin + SPEC_GAP);
+  commitSpectrum();
+});
+
+lsRes.addEventListener("input", () => {
+  const v = Math.round(parseFloat(lsRes.value));
+  if (linebedSpectrum.mode === "chromatic") linebedSpectrum.divPerOctave = v;
+  else linebedSpectrum.cols = v;
+  commitSpectrum();
+});
+
+lsBlend.addEventListener("input", () => {
+  linebedSpectrum.blend = Math.max(0, Math.min(1, parseFloat(lsBlend.value)));
+  persistSpectrum(); // no rebuild; only aggregation weight changes
+  syncLinebedSpectrumPanel();
 });
 
 // ── Lyrics styling + motion controls ────────────────────────────────────
@@ -526,6 +625,116 @@ lmOffset.addEventListener("input", () => {
   lyricOffset = parseFloat(lmOffset.value);
   try { localStorage.setItem("lyricOffset", String(lyricOffset)); } catch {}
   syncMotionPanel();
+});
+
+// ── FFT / audio-analysis controls ───────────────────────────────────────
+// Expose the AudioEngine analysis params as live sliders. Persisted; pushed to
+// the engine via its setters (which also seed lazy init()). Lowering fftSize
+// blurs the linebed's per-semitone resolution — that trade-off is the user's.
+// Band crossovers in Hz. Caps reflect what's musically useful: bass tops out
+// ~2 kHz, mids ~10 kHz (above that is mostly inaudible air / often empty).
+const FFT_DEFAULTS = { fftSize: 16384, smoothing: 0.65, gain: 1, bassHz: 250, midHz: 4000 };
+const FFT_SIZES = [2048, 4096, 8192, 16384, 32768];
+const FFT_BASS_RANGE = [100, 2000];
+const FFT_MID_RANGE = [400, 10000];
+
+let fftSize = FFT_DEFAULTS.fftSize;
+try {
+  const v = parseInt(localStorage.getItem("fftSize"), 10);
+  if (FFT_SIZES.includes(v)) fftSize = v;
+} catch {}
+let fftSmoothing = loadNum("fftSmoothing", FFT_DEFAULTS.smoothing, 0, 0.95);
+let fftGain = loadNum("fftGain", FFT_DEFAULTS.gain, 0.2, 4);
+let fftBassHz = loadNum("fftBassHz", FFT_DEFAULTS.bassHz, ...FFT_BASS_RANGE);
+let fftMidHz = loadNum("fftMidHz", FFT_DEFAULTS.midHz, ...FFT_MID_RANGE);
+
+// Push current params into the engine. midHz is clamped above bassHz so the
+// mid band can never invert.
+function applyFftParams() {
+  audio.setFftSize(fftSize);
+  audio.setSmoothing(fftSmoothing);
+  audio.setGain(fftGain);
+  audio.setBandSplits(fftBassHz, Math.max(fftMidHz, fftBassHz + 50));
+}
+applyFftParams();
+
+const fftSizeSel = document.getElementById("ft-size");
+const fftSmoothInput = document.getElementById("ft-smooth");
+const fftSmoothLabel = document.getElementById("ft-smooth-label");
+const fftGainInput = document.getElementById("ft-gain");
+const fftGainLabel = document.getElementById("ft-gain-label");
+const fftBassInput = document.getElementById("ft-bass");
+const fftBassLabel = document.getElementById("ft-bass-label");
+const fftMidInput = document.getElementById("ft-mid");
+const fftMidLabel = document.getElementById("ft-mid-label");
+
+function syncFftPanel() {
+  fftSizeSel.value = String(fftSize);
+  fftSmoothInput.value = fftSmoothing;
+  fftSmoothLabel.textContent = `Smoothing ${Math.round(fftSmoothing * 100)}%`;
+  fftGainInput.value = fftGain;
+  fftGainLabel.textContent = `Gain ${fftGain.toFixed(2)}×`;
+  fftBassInput.value = fftBassHz;
+  fftBassLabel.textContent = `Bass < ${Math.round(fftBassHz)} Hz`;
+  fftMidInput.value = fftMidHz;
+  fftMidLabel.textContent = `Mid < ${Math.round(fftMidHz)} Hz`;
+}
+
+fftSizeSel.addEventListener("change", () => {
+  const v = parseInt(fftSizeSel.value, 10);
+  if (!FFT_SIZES.includes(v)) return;
+  fftSize = v;
+  try { localStorage.setItem("fftSize", String(fftSize)); } catch {}
+  audio.setFftSize(fftSize);
+  linebedHistory.length = 0; // bin count changed — drop stale rows
+  linebedPrevRow = null;
+});
+
+fftSmoothInput.addEventListener("input", () => {
+  fftSmoothing = parseFloat(fftSmoothInput.value);
+  try { localStorage.setItem("fftSmoothing", String(fftSmoothing)); } catch {}
+  audio.setSmoothing(fftSmoothing);
+  syncFftPanel();
+});
+
+fftGainInput.addEventListener("input", () => {
+  fftGain = parseFloat(fftGainInput.value);
+  try { localStorage.setItem("fftGain", String(fftGain)); } catch {}
+  audio.setGain(fftGain);
+  syncFftPanel();
+});
+
+fftBassInput.addEventListener("input", () => {
+  fftBassHz = parseFloat(fftBassInput.value);
+  try { localStorage.setItem("fftBassHz", String(fftBassHz)); } catch {}
+  applyFftParams();
+  syncFftPanel();
+});
+
+fftMidInput.addEventListener("input", () => {
+  fftMidHz = parseFloat(fftMidInput.value);
+  try { localStorage.setItem("fftMidHz", String(fftMidHz)); } catch {}
+  applyFftParams();
+  syncFftPanel();
+});
+
+document.getElementById("ft-reset").addEventListener("click", () => {
+  fftSize = FFT_DEFAULTS.fftSize;
+  fftSmoothing = FFT_DEFAULTS.smoothing;
+  fftGain = FFT_DEFAULTS.gain;
+  fftBassHz = FFT_DEFAULTS.bassHz;
+  fftMidHz = FFT_DEFAULTS.midHz;
+  try {
+    localStorage.removeItem("fftSize");
+    localStorage.removeItem("fftSmoothing");
+    localStorage.removeItem("fftGain");
+    localStorage.removeItem("fftBassHz");
+    localStorage.removeItem("fftMidHz");
+  } catch {}
+  applyFftParams();
+  linebedHistory.length = 0;
+  linebedPrevRow = null;
+  syncFftPanel();
 });
 
 btnMinimize.addEventListener("click", () => {
@@ -1329,33 +1538,116 @@ function drawWaveform(metrics, w, h, time) {
 // area beneath its curve with the background colour before stroking, so nearer
 // (lower) ridges occlude the rows behind them — the classic hidden-line look.
 const LINEBED_ROWS = 80;
-// One column per semitone, C1 (MIDI 24) up. 84 = 7 octaves to C8.
-const LINEBED_START_MIDI = 24;
-const LINEBED_COLS = 84;
 const LINEBED_BG = "#0a0a0f";
-let linebedHistory = []; // newest at index 0; each entry a Float32Array(LINEBED_COLS)
+let linebedHistory = []; // newest at index 0; each entry a Float32Array(cols)
 let linebedAccum = 0;
 let linebedPrevRow = null; // last pre-velocity baseline, for transient boost
 
-function midiToFreq(midi) {
-  return 440 * Math.pow(2, (midi - 69) / 12);
+// Spectrum layout: per-column frequency bands [fLoHz, fHiHz], rebuilt by
+// buildLinebedBands() whenever a spectrum setting changes. Column count is
+// linebedBands.length (no longer a fixed constant). Defaults reproduce the
+// original chromatic C1→C8 layout (12 divisions/octave, ~32 Hz–4 kHz).
+const LINEBED_SPECTRUM_DEFAULTS = {
+  mode: "chromatic", // chromatic | log | linear | mel
+  mag: "db", // db (perceptual) | linear (true amplitude)
+  fMin: 32, // Hz
+  fMax: 16000, // Hz — full audible span so treble detail shows by default
+  divPerOctave: 12, // chromatic resolution (12 = semitones; higher = microtonal)
+  cols: 84, // column count for log/linear/mel modes
+  blend: 0.72, // per-band peak↔average mix (1 = peak only, 0 = average only)
+};
+const LINEBED_SPECTRUM_LIMITS = { fLo: 20, fHi: 26000, colsMax: 240 };
+let linebedSpectrum = { ...LINEBED_SPECTRUM_DEFAULTS };
+try {
+  const saved = JSON.parse(localStorage.getItem("linebedSpectrum") || "null");
+  if (saved && typeof saved === "object") {
+    linebedSpectrum = { ...LINEBED_SPECTRUM_DEFAULTS, ...saved };
+  }
+} catch {}
+let linebedBands = [];
+
+function melOf(f) {
+  return 2595 * Math.log10(1 + f / 700);
+}
+function melInv(m) {
+  return 700 * (Math.pow(10, m / 2595) - 1);
 }
 
+// Recompute the per-column [fLo, fHi] band table from linebedSpectrum, and
+// reset the scroll history (column count / mapping has changed).
+function buildLinebedBands() {
+  const s = linebedSpectrum;
+  const fMin = Math.max(LINEBED_SPECTRUM_LIMITS.fLo, Math.min(s.fMin, s.fMax - 1));
+  const fMax = Math.min(LINEBED_SPECTRUM_LIMITS.fHi, Math.max(s.fMax, fMin + 1));
+  const bands = [];
+  if (s.mode === "chromatic") {
+    const div = Math.max(1, Math.round(s.divPerOctave));
+    const ratio = Math.pow(2, 1 / div); // width of one division
+    const halfLo = Math.pow(2, -0.5 / div);
+    const halfHi = Math.pow(2, 0.5 / div);
+    const steps = Math.min(
+      LINEBED_SPECTRUM_LIMITS.colsMax,
+      Math.floor(Math.log2(fMax / fMin) * div) + 1,
+    );
+    let fc = fMin;
+    for (let k = 0; k < steps; k++) {
+      bands.push([fc * halfLo, fc * halfHi]);
+      fc *= ratio;
+    }
+  } else {
+    const n = Math.min(LINEBED_SPECTRUM_LIMITS.colsMax, Math.max(8, Math.round(s.cols)));
+    for (let k = 0; k < n; k++) {
+      let lo, hi;
+      if (s.mode === "linear") {
+        lo = fMin + ((fMax - fMin) * k) / n;
+        hi = fMin + ((fMax - fMin) * (k + 1)) / n;
+      } else if (s.mode === "mel") {
+        const mLo = melOf(fMin),
+          mHi = melOf(fMax);
+        lo = melInv(mLo + ((mHi - mLo) * k) / n);
+        hi = melInv(mLo + ((mHi - mLo) * (k + 1)) / n);
+      } else {
+        // log
+        const r = fMax / fMin;
+        lo = fMin * Math.pow(r, k / n);
+        hi = fMin * Math.pow(r, (k + 1) / n);
+      }
+      bands.push([lo, hi]);
+    }
+  }
+  linebedBands = bands;
+  linebedHistory.length = 0;
+  linebedPrevRow = null;
+}
+buildLinebedBands();
+
 function pushLinebedRow(metrics, params) {
-  const freq = metrics.frequencyData;
+  const bands = linebedBands;
+  const cols = bands.length;
   const sr = metrics.sampleRate || 44100;
-  const binFreq = sr / 2 / freq.length; // Hz per bin
+  const linear = linebedSpectrum.mag === "linear";
+  // dB source for linear amplitude, byte (0-255, perceptual) otherwise.
+  const freq = linear ? audio.getFloatFrequencyData() : metrics.frequencyData;
+  const binFreq = freq.length > 0 ? sr / 2 / freq.length : 1;
+  // Normalize each bin to 0..1 up front so peak/avg aggregate cleanly.
+  const maxDb = audio.analyser ? audio.analyser.maxDecibels : -30;
+  const minDb = audio.analyser ? audio.analyser.minDecibels : -100;
+  const norm = (i) => {
+    if (!linear) return freq[i] / 255;
+    const d = freq[i];
+    if (!Number.isFinite(d) || d <= minDb) return 0;
+    return Math.min(1, Math.pow(10, (d - maxDb) / 20)); // linear amp vs full scale
+  };
+  const blend = linebedSpectrum.blend;
   const gate = params.gate;
   const gamma = params.contrast;
   const velocity = params.velocity;
-  const base = new Float32Array(LINEBED_COLS); // post-gate/gamma, pre-velocity
-  const row = new Float32Array(LINEBED_COLS); // what we store/draw
+  const base = new Float32Array(cols); // post-gate/gamma, pre-velocity
+  const row = new Float32Array(cols); // what we store/draw
 
-  for (let c = 0; c < LINEBED_COLS; c++) {
-    const midi = LINEBED_START_MIDI + c;
-    // Gather the bins spanning this semitone's half-step-wide band.
-    const fLo = midiToFreq(midi - 0.5);
-    const fHi = midiToFreq(midi + 0.5);
+  for (let c = 0; c < cols; c++) {
+    const fLo = bands[c][0];
+    const fHi = bands[c][1];
     let lo = Math.floor(fLo / binFreq);
     let hi = Math.ceil(fHi / binFreq);
     lo = Math.max(0, Math.min(lo, freq.length - 1));
@@ -1364,13 +1656,12 @@ function pushLinebedRow(metrics, params) {
     let peak = 0;
     let sum = 0;
     for (let i = lo; i < hi; i++) {
-      const v = freq[i];
+      const v = norm(i);
       sum += v;
       if (v > peak) peak = v;
     }
-    // Peak-weighted: emphasise the dominant pitch so intonation reads, with a
-    // little averaging for body.
-    let val = (peak * 0.72 + (sum / (hi - lo)) * 0.28) / 255;
+    // Blend the dominant bin (intonation reads) with the band average (body).
+    let val = peak * blend + (sum / (hi - lo)) * (1 - blend);
     // Gate: lift the noise floor away so quiet passages read as flat silence
     // instead of constant sea-wave ripple.
     if (gate > 0) val = val > gate ? (val - gate) / (1 - gate) : 0;
@@ -1378,7 +1669,7 @@ function pushLinebedRow(metrics, params) {
     base[c] = Math.min(1, Math.pow(val, gamma));
   }
 
-  for (let c = 0; c < LINEBED_COLS; c++) {
+  for (let c = 0; c < cols; c++) {
     let v = base[c];
     // Velocity: a column rising vs the previous snapshot punches taller, so
     // attacks and onsets are visible rather than smoothed away.
@@ -1399,9 +1690,11 @@ function drawLinebed(metrics, w, h, time, dt) {
   const params = getLinebedParams();
   // Advance the scroll at a fixed cadence so it's frame-rate independent.
   linebedAccum += dt;
-  const stepInterval = 1 / 50;
+  // The full row stack spans linebedDuration seconds top→bottom, so each of the
+  // LINEBED_ROWS ridges represents that slice of recent history.
+  const stepInterval = linebedDuration / LINEBED_ROWS;
   let pushed = 0;
-  while (linebedAccum >= stepInterval && pushed < 4) {
+  while (linebedAccum >= stepInterval && pushed < 8) {
     pushLinebedRow(metrics, params);
     linebedAccum -= stepInterval;
     pushed++;
@@ -1444,10 +1737,11 @@ function drawLinebed(metrics, w, h, time, dt) {
     const rowW = wNear + (wFar - wNear) * d;
     const amp = ampNear + (ampFar - ampNear) * d;
     const left = cx - rowW / 2;
-    const colStep = rowW / (LINEBED_COLS - 1);
+    const cols = row.length;
+    const colStep = rowW / Math.max(1, cols - 1);
 
     const trace = () => {
-      for (let c = 0; c < LINEBED_COLS; c++) {
+      for (let c = 0; c < cols; c++) {
         const x = left + c * colStep;
         const y = yBase - row[c] * amp;
         if (c === 0) ctx.moveTo(x, y);

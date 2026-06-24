@@ -452,6 +452,38 @@
       background: #ffb347;
     }
 
+    /* Stacked-label slider row (label above control) for the dual range. */
+    .lb-slider-col { grid-template-columns: 1fr; gap: 6px; }
+
+    /* Two overlaid range inputs forming a single start–end range slider. */
+    .dual-range {
+      position: relative;
+      height: 18px;
+      display: flex;
+      align-items: center;
+    }
+    .dual-range::before {
+      content: "";
+      position: absolute;
+      left: 0; right: 0; top: 50%;
+      transform: translateY(-50%);
+      height: 4px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.16);
+    }
+    .dual-range input[type="range"] {
+      position: absolute;
+      left: 0; top: 50%;
+      transform: translateY(-50%);
+      width: 100%;
+      margin: 0;
+      height: 4px;
+      background: none;       /* track drawn by ::before */
+      pointer-events: none;   /* only the thumbs grab pointer events */
+    }
+    .dual-range input[type="range"]::-webkit-slider-thumb { pointer-events: auto; }
+    .dual-range input[type="range"]::-moz-range-thumb { pointer-events: auto; }
+
     .lb-select {
       width: 100%;
       min-width: 0;
@@ -645,6 +677,7 @@
       <div class="settings-tabs" role="tablist" aria-label="Settings pages">
         <button class="settings-tab" type="button" role="tab" data-page="viz" aria-selected="true">Visualizer</button>
         <button class="settings-tab" type="button" role="tab" data-page="lyrics" aria-selected="false">Lyrics</button>
+        <button class="settings-tab" type="button" role="tab" data-page="audio" aria-selected="false">Audio</button>
         <button class="settings-tab" type="button" role="tab" data-page="linebed" aria-selected="false">Linebed</button>
       </div>
 
@@ -687,6 +720,37 @@
         <div class="cap-hint">Motion 0% = still text. Offset nudges lyric sync. Reveal suits Cursive.</div>
       </div>
 
+      <div class="settings-page" data-page="audio" role="tabpanel" hidden>
+        <div class="lb-title">Audio analysis (FFT)</div>
+        <div class="lb-sliders">
+          <label class="lb-slider"><span>FFT size</span>
+            <select id="ft-size" class="lb-select">
+              <option value="2048">2048</option>
+              <option value="4096">4096</option>
+              <option value="8192">8192</option>
+              <option value="16384">16384</option>
+              <option value="32768">32768</option>
+            </select>
+          </label>
+          <label class="lb-slider"><span id="ft-smooth-label">Smoothing</span>
+            <input type="range" id="ft-smooth" min="0" max="0.95" step="0.01" />
+          </label>
+          <label class="lb-slider"><span id="ft-gain-label">Gain</span>
+            <input type="range" id="ft-gain" min="0.2" max="4" step="0.05" />
+          </label>
+          <label class="lb-slider"><span id="ft-bass-label">Bass</span>
+            <input type="range" id="ft-bass" min="100" max="2000" step="10" />
+          </label>
+          <label class="lb-slider"><span id="ft-mid-label">Mid</span>
+            <input type="range" id="ft-mid" min="400" max="10000" step="50" />
+          </label>
+          <div class="lb-slider"><span>Reset</span>
+            <button type="button" id="ft-reset" class="lb-flip">Restore defaults</button>
+          </div>
+        </div>
+        <div class="cap-hint">Higher FFT size = finer pitch detail (sharper linebed) but heavier. Bass/Mid set the band split for beat detection.</div>
+      </div>
+
       <div class="settings-page" data-page="linebed" role="tabpanel" hidden>
         <div class="lb-title">Linebed</div>
         <div class="cap-hint" id="lb-inactive-hint" hidden>Switch Visualizer to Linebed for these to take effect.</div>
@@ -698,6 +762,9 @@
         <div class="lb-sliders">
           <label class="lb-slider"><span>Opacity</span>
             <input type="range" id="lb-opacity" min="0" max="1" step="0.01" />
+          </label>
+          <label class="lb-slider"><span id="lb-duration-label">History</span>
+            <input type="range" id="lb-duration" min="0.8" max="12" step="0.1" />
           </label>
         </div>
         <div class="lb-sliders" id="lb-sliders">
@@ -717,6 +784,36 @@
             <button type="button" id="lb-flip" class="lb-flip" role="switch" aria-checked="true">Newest at bottom</button>
           </div>
         </div>
+        <div class="lb-title" style="margin-top:10px">Spectrum base</div>
+        <div class="lb-sliders">
+          <label class="lb-slider"><span>Mapping</span>
+            <select id="ls-mode" class="lb-select">
+              <option value="chromatic">Chromatic (per-note)</option>
+              <option value="log">Logarithmic</option>
+              <option value="linear">Linear</option>
+              <option value="mel">Mel (perceptual)</option>
+            </select>
+          </label>
+          <label class="lb-slider"><span>Magnitude</span>
+            <select id="ls-mag" class="lb-select">
+              <option value="db">dB (perceptual)</option>
+              <option value="linear">Linear amplitude</option>
+            </select>
+          </label>
+          <div class="lb-slider lb-slider-col"><span id="ls-range-label">Range</span>
+            <div class="dual-range">
+              <input type="range" id="ls-fmin" min="0" max="26000" step="50" />
+              <input type="range" id="ls-fmax" min="0" max="26000" step="50" />
+            </div>
+          </div>
+          <label class="lb-slider" id="ls-res-wrap"><span id="ls-res-label">Resolution</span>
+            <input type="range" id="ls-res" min="6" max="72" step="1" />
+          </label>
+          <label class="lb-slider"><span id="ls-blend-label">Peak↔Avg</span>
+            <input type="range" id="ls-blend" min="0" max="1" step="0.01" />
+          </label>
+        </div>
+        <div class="cap-hint">Chromatic = one column per pitch step; raise “Per octave” past 12 for microtonal detail. Range sets the low/high edges (sub-bass → treble).</div>
       </div>
     </div>
     <div id="capture-panel" class="linebed-panel capture-panel" role="dialog" aria-label="Audio capture source" hidden>

@@ -13,6 +13,17 @@ export class AudioEngine {
     this.timeDomainData = new Uint8Array(0)
     this.loadVersion = 0
     this.onStateChange = null
+    // Analysis params, tunable live from the FFT settings page. Stored as fields
+    // so they apply both immediately (via setters) and at lazy init() time.
+    // Large default fftSize so low octaves resolve to individual semitones
+    // (~1.3 Hz/bin at 44.1 kHz) for the chromatic linebed visualization.
+    this.fftSize = 16384
+    this.smoothing = 0.65
+    this.inputGainValue = 1
+    // Band split crossovers in Hz: [0, bassSplitHz) = bass,
+    // [bassSplitHz, midSplitHz) = mid, [midSplitHz, nyquist) = treble.
+    this.bassSplitHz = 250
+    this.midSplitHz = 4000
     // Live system/tab audio capture (getDisplayMedia) state.
     this.captureMode = false
     this.captureStream = null
@@ -26,13 +37,15 @@ export class AudioEngine {
   async init() {
     this.ctx = new AudioContext()
     this.analyser = this.ctx.createAnalyser()
-    // Large FFT so low octaves resolve to individual semitones (~1.3 Hz/bin
-    // at 44.1 kHz) for the chromatic linebed visualization.
-    this.analyser.fftSize = 16384
-    this.analyser.smoothingTimeConstant = 0.65
-    // analyser → monitorGain → speakers. monitorGain is muted during live
-    // capture so the visualizer can analyse the tab/system audio without
-    // re-playing it (which would double/echo what the source app already plays).
+    this.analyser.fftSize = this.fftSize
+    this.analyser.smoothingTimeConstant = this.smoothing
+    // sources → inputGain → analyser → monitorGain → speakers. inputGain scales
+    // the signal feeding analysis (FFT settings "Gain"). monitorGain is muted
+    // during live capture so the visualizer can analyse the tab/system audio
+    // without re-playing it (which would double/echo the source app's output).
+    this.inputGain = this.ctx.createGain()
+    this.inputGain.gain.value = this.inputGainValue
+    this.inputGain.connect(this.analyser)
     this.monitorGain = this.ctx.createGain()
     this.analyser.connect(this.monitorGain)
     this.monitorGain.connect(this.ctx.destination)
@@ -56,7 +69,7 @@ export class AudioEngine {
     this.captureSource = this.ctx.createMediaStreamSource(
       new MediaStream(audioTracks),
     )
-    this.captureSource.connect(this.analyser)
+    this.captureSource.connect(this.inputGain)
     this.monitorGain.gain.value = 0 // don't re-emit; source already plays it
     this.captureMode = true
     this.playing = true // so the render loop pulls live metrics
@@ -151,7 +164,7 @@ export class AudioEngine {
         }
       }
     }
-    node.connect(this.analyser)
+    node.connect(this.inputGain)
     this.monitorGain.gain.value = 0 // system already plays it; don't re-emit
     this.captureMode = true
     this.playing = true
@@ -228,6 +241,35 @@ export class AudioEngine {
     this.notifyStateChange()
   }
 
+  // ── Live analysis-param setters (FFT settings page) ─────────────────────
+  // Each updates the stored field so it also takes effect at lazy init(), and
+  // applies immediately when the graph already exists.
+  setFftSize(n) {
+    this.fftSize = n
+    if (this.analyser) {
+      this.analyser.fftSize = n
+      const bufLen = this.analyser.frequencyBinCount
+      this.frequencyData = new Uint8Array(bufLen)
+      this.timeDomainData = new Uint8Array(bufLen)
+    }
+  }
+
+  setSmoothing(v) {
+    this.smoothing = v
+    if (this.analyser) this.analyser.smoothingTimeConstant = v
+  }
+
+  setGain(v) {
+    this.inputGainValue = v
+    if (this.inputGain) this.inputGain.gain.value = v
+  }
+
+  // Band split crossovers in Hz (bass < bassSplitHz < mid < midSplitHz).
+  setBandSplits(bassHz, midHz) {
+    this.bassSplitHz = bassHz
+    this.midSplitHz = Math.max(midHz, bassHz)
+  }
+
   async loadFile(file) {
     const arrayBuffer = await file.arrayBuffer()
     return this.loadArrayBuffer(arrayBuffer)
@@ -260,7 +302,7 @@ export class AudioEngine {
 
     const source = this.ctx.createBufferSource()
     source.buffer = this.audioBuffer
-    source.connect(this.analyser)
+    source.connect(this.inputGain)
     source.start(0, this.pauseOffset)
     this.source = source
     this.startTime = this.ctx.currentTime - this.pauseOffset
@@ -330,6 +372,18 @@ export class AudioEngine {
     return this.frequencyData
   }
 
+  // Raw FFT magnitudes in dBFS (typically minDecibels..maxDecibels). Used by
+  // the linebed's "Linear" magnitude mode, which needs true amplitude rather
+  // than the perceptually-companded byte values getByteFrequencyData returns.
+  getFloatFrequencyData() {
+    const n = this.analyser ? this.analyser.frequencyBinCount : 0
+    if (!this._floatFreq || this._floatFreq.length !== n) {
+      this._floatFreq = new Float32Array(n)
+    }
+    if (this.analyser) this.analyser.getFloatFrequencyData(this._floatFreq)
+    return this._floatFreq
+  }
+
   // Get waveform data
   getTimeDomainData() {
     if (this.analyser) this.analyser.getByteTimeDomainData(this.timeDomainData)
@@ -342,16 +396,19 @@ export class AudioEngine {
     const wave = this.getTimeDomainData()
 
     const binCount = freq.length
+    const nyquist = this.sampleRate / 2
+    const hzToBin = (hz) =>
+      Math.max(0, Math.min(binCount, Math.floor((hz / nyquist) * binCount)))
 
-    // Bass energy (20-250 Hz range, roughly first ~12 bins at 44100/2048)
+    // Bass energy ([0, bassSplitHz))
     let bass = 0
-    const bassEnd = Math.floor(binCount * 0.02)
+    const bassEnd = hzToBin(this.bassSplitHz)
     for (let i = 0; i < bassEnd; i++) bass += freq[i]
     bass = bassEnd > 0 ? bass / (bassEnd * 255) : 0
 
-    // Mid energy (250-4000 Hz)
+    // Mid energy ([bassSplitHz, midSplitHz))
     const midStart = bassEnd
-    const midEnd = Math.floor(binCount * 0.18)
+    const midEnd = Math.max(hzToBin(this.midSplitHz), midStart)
     let mid = 0
     for (let i = midStart; i < midEnd; i++) mid += freq[i]
     mid = (midEnd - midStart) > 0 ? mid / ((midEnd - midStart) * 255) : 0
