@@ -34,6 +34,19 @@ export class NowPlayingBridge {
     this.active = false;
   }
 
+  // Play / pause the system player the bridge reports on. action is one of
+  // "play" | "pause" | "play-pause". Re-polls immediately so the UI reflects
+  // the new status without waiting for the next poll tick.
+  async control(action) {
+    try {
+      await fetch(`/api/control?action=${action}`, { method: "POST" });
+    } catch {
+      return false;
+    }
+    await this._poll();
+    return true;
+  }
+
   // Returns playback position in seconds, extrapolated since the last poll
   // while playing — or null when no track is known.
   getTime() {

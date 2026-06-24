@@ -135,11 +135,58 @@ export const READER_NAME =
         ? "PowerShell SMTC"
         : "(unsupported)";
 
+// Browsers (esp. Firefox/Zen) report MPRIS metadata from the page's
+// MediaSession, but when a site sets none they fall back to the TAB TITLE —
+// which carries a streaming-service brand ("Song - Spotify", "Song | Deezer").
+// Some players (e.g. kdeconnect phone bridges) also prefix the artist into the
+// title ("Artist - Song"). Both poison the lrclib query and the on-screen
+// label, so strip them here, in one place, for every platform reader.
+const SERVICE_SUFFIX =
+  /\s*[-–—|·•]\s*(spotify|deezer|tidal|qobuz|youtube music|youtube|apple music|soundcloud|amazon music|pandora|napster)\s*$/i;
+
+// Identify the streaming service from the (raw) title suffix or, for native
+// apps, the player name. Returns a slug like "spotify" / "youtube-music", or ""
+// when unknown (e.g. a generic chromium/firefox tab with proper metadata).
+function detectService(rawTitle, player) {
+  const m = (rawTitle || "").match(SERVICE_SUFFIX);
+  if (m) return m[1].toLowerCase().replace(/\s+/g, "-");
+  const p = (player || "").toLowerCase();
+  for (const s of ["spotify", "deezer", "tidal", "qobuz", "soundcloud"]) {
+    if (p.includes(s)) return s;
+  }
+  return "";
+}
+
+function normalizeTrack(t) {
+  const rawTitle = (t.title || "").trim();
+  const artist = (t.artist || "").trim();
+  let title = rawTitle;
+  // Drop a trailing service brand (repeat: "Song - Deezer - Deezer").
+  let prev;
+  do {
+    prev = title;
+    title = title.replace(SERVICE_SUFFIX, "").trim();
+  } while (title !== prev);
+  // Drop a leading "<artist> - " the player duplicated into the title.
+  if (artist) {
+    const prefix = `${artist} - `;
+    if (title.toLowerCase().startsWith(prefix.toLowerCase())) {
+      title = title.slice(prefix.length).trim();
+    }
+  }
+  return {
+    ...t,
+    title: title || t.title,
+    artist,
+    service: detectService(rawTitle, t.player),
+  };
+}
+
 export async function getNowPlaying() {
   if (!reader) return { ok: false, error: `unsupported platform: ${OS}` };
   const data = await reader();
   if (!data) return { ok: false, error: "no active media session" };
-  return { ok: true, ts: Date.now(), ...data };
+  return { ok: true, ts: Date.now(), ...normalizeTrack(data) };
 }
 
 // ── System audio loopback stream ─────────────────────────────────────────
@@ -203,6 +250,76 @@ async function streamAudio(req, res, rate) {
   res.on("close", cleanup);
 }
 
+// ── Playback control ──────────────────────────────────────────────────────
+// Toggle/play/pause the OS media session the readers above report on. Action
+// is whitelisted to fixed verbs, so nothing user-supplied reaches the shell.
+
+const LINUX_CMD = {
+  play: "play",
+  pause: "pause",
+  "play-pause": "play-pause",
+  next: "next",
+  previous: "previous",
+};
+
+async function controlLinux(action) {
+  return (await run("playerctl", [LINUX_CMD[action] || "play-pause"])) !== null;
+}
+
+const MAC_CMD = {
+  play: "play",
+  pause: "pause",
+  "play-pause": "togglePlayPause",
+  next: "next",
+  previous: "previous",
+};
+
+async function controlMac(action) {
+  return (
+    (await run("nowplaying-cli", [MAC_CMD[action] || "togglePlayPause"])) !==
+    null
+  );
+}
+
+function controlPsScript(method) {
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] > $null",
+    "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+    "$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]",
+    "function Await($op, $t) { $m = $asTask.MakeGenericMethod($t); $task = $m.Invoke($null, @($op)); $task.Wait(); $task.Result }",
+    "$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])",
+    "$s = $mgr.GetCurrentSession()",
+    "if ($null -eq $s) { exit 1 }",
+    `Await ($s.${method}()) ([bool]) > $null`,
+  ].join("\n");
+}
+
+const WIN_METHOD = {
+  play: "TryPlayAsync",
+  pause: "TryPauseAsync",
+  "play-pause": "TryTogglePlayPauseAsync",
+  next: "TrySkipNextAsync",
+  previous: "TrySkipPreviousAsync",
+};
+
+async function controlWindows(action) {
+  const method = WIN_METHOD[action] || "TryTogglePlayPauseAsync";
+  const out = await run(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", controlPsScript(method)],
+    3000,
+  );
+  return out !== null;
+}
+
+export async function controlPlayback(action) {
+  if (OS === "linux") return controlLinux(action);
+  if (OS === "darwin") return controlMac(action);
+  if (OS === "win32") return controlWindows(action);
+  return false;
+}
+
 // Handle the /api/* routes. Returns true if the request was handled (so the
 // caller can stop), false to let static serving / next middleware take over.
 export async function handleApi(req, res, url) {
@@ -223,6 +340,20 @@ export async function handleApi(req, res, url) {
       Math.max(8000, Number(url.searchParams.get("rate")) || 48000),
     );
     await streamAudio(req, res, rate);
+    return true;
+  }
+  if (url.pathname === "/api/control") {
+    const action = url.searchParams.get("action") || "play-pause";
+    const allowed = ["play", "pause", "play-pause", "next", "previous"];
+    const ok = allowed.includes(action)
+      ? await controlPlayback(action)
+      : false;
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(JSON.stringify({ ok }));
     return true;
   }
   return false;

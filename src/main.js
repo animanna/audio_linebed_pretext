@@ -13,6 +13,7 @@ import { parseLyricsFile } from "./lrc-parser.js";
 import { fetchLyrics } from "./lyrics-fetch.js";
 import { readID3Tags } from "./id3-reader.js";
 import { NowPlayingBridge } from "./now-playing-bridge.js";
+import { serviceIcon, serviceLabel } from "./service-icons.js";
 
 // ── State ──────────────────────────────────────────────────────────────
 const APP_BASE_URL = import.meta.env.BASE_URL || "/";
@@ -50,9 +51,11 @@ resize();
 window.addEventListener("resize", resize);
 
 // ── UI wiring ──────────────────────────────────────────────────────────
-const btnPlay = document.getElementById("btn-play");
-const btnPause = document.getElementById("btn-pause");
+const btnPlayPause = document.getElementById("btn-playpause");
+const btnPrev = document.getElementById("btn-prev");
+const btnNext = document.getElementById("btn-next");
 const nowPlaying = document.getElementById("now-playing");
+const npService = document.getElementById("np-service");
 const lyricsStatus = document.getElementById("lyrics-status");
 const seekBar = document.getElementById("seek-bar");
 const currentTimeLabel = document.getElementById("current-time");
@@ -63,7 +66,6 @@ const captureIndicator = document.getElementById("capture-indicator");
 const capturePanel = document.getElementById("capture-panel");
 const capList = document.getElementById("cap-list");
 const capHint = document.getElementById("cap-hint");
-const btnViz = document.getElementById("btn-viz");
 const btnMinimize = document.getElementById("btn-minimize");
 const transportShell = document.querySelector(".transport-shell");
 const fileInput = document.getElementById("file-input");
@@ -100,9 +102,22 @@ function syncProgressUI() {
 }
 
 function syncPlaybackControls() {
-  const ready = audio.duration > 0;
-  btnPlay.disabled = !ready || audio.playing;
-  btnPause.disabled = !ready || !audio.playing;
+  let playing, ready;
+  if (bridge.active && bridge.track) {
+    // Controlling the system player: state comes from its reported status.
+    playing = bridge.track.status === "Playing";
+    ready = true;
+  } else {
+    ready = audio.duration > 0;
+    playing = audio.playing;
+  }
+  // One toggle button: enabled when there's something to play, icon + label
+  // follow the live state (the .ico-play / .ico-pause swap is CSS-driven).
+  btnPlayPause.disabled = !ready;
+  btnPlayPause.dataset.playing = playing ? "true" : "false";
+  const label = playing ? "Pause" : "Play";
+  btnPlayPause.setAttribute("aria-label", label);
+  btnPlayPause.dataset.tip = label;
   syncProgressUI();
 }
 
@@ -229,44 +244,107 @@ audio.onStateChange = () => {
   syncCaptureUI();
 };
 
-btnPlay.addEventListener("click", () => {
-  audio.play();
-  startLoop();
-  syncPlaybackControls();
-});
-
-btnPause.addEventListener("click", () => {
-  audio.pause();
+btnPlayPause.addEventListener("click", () => {
+  const playing = btnPlayPause.dataset.playing === "true";
+  if (playing) {
+    if (bridge.active) bridge.control("pause").then(syncPlaybackControls);
+    else audio.pause();
+  } else {
+    if (bridge.active) bridge.control("play").then(syncPlaybackControls);
+    else audio.play();
+    startLoop();
+  }
   syncPlaybackControls();
 });
 
 // ── Visualizer selection ────────────────────────────────────────────────
 // Linebed is the landing default; the bars+wave mode is the alternate.
 const VIZ_MODES = ["linebed", "default"];
-const VIZ_LABELS = { default: "Bars + Wave", linebed: "Linebed" };
 let vizMode = "linebed";
 try {
   const saved = localStorage.getItem("vizMode");
   if (saved && VIZ_MODES.includes(saved)) vizMode = saved;
 } catch {}
 
-function updateVizButton() {
-  const label = VIZ_LABELS[vizMode];
-  btnViz.dataset.tip = `Visualizer: ${label}`;
-  btnViz.setAttribute("aria-label", `Visualizer: ${label}. Click to change.`);
+// ── Settings popover (paginated: Visualizer / Lyrics / Linebed) ──────────
+// One gear button opens a tabbed popover. The Visualizer page replaces the
+// old cycle button; the Lyrics and Linebed pages host the controls defined in
+// their sections below (their sync/input wiring stays there). syncMotionPanel
+// and syncLinebedPanel are hoisted, so openSettings can call them safely.
+const btnSettings = document.getElementById("btn-settings");
+const settingsPanel = document.getElementById("settings-panel");
+const settingsTabs = settingsPanel.querySelectorAll(".settings-tab");
+const settingsPages = settingsPanel.querySelectorAll(".settings-page");
+const vizModeBtns = settingsPanel.querySelectorAll(".viz-mode");
+const lbInactiveHint = document.getElementById("lb-inactive-hint");
+
+function syncVizPage() {
+  vizModeBtns.forEach((b) =>
+    b.setAttribute("aria-checked", b.dataset.viz === vizMode ? "true" : "false"),
+  );
 }
 
-btnViz.addEventListener("click", () => {
-  const next = (VIZ_MODES.indexOf(vizMode) + 1) % VIZ_MODES.length;
-  vizMode = VIZ_MODES[next];
-  try {
-    localStorage.setItem("vizMode", vizMode);
-  } catch {}
-  updateVizButton();
-  syncLinebedButton();
+// Linebed params only affect the linebed visualizer; dim that page + flag its
+// tab when another viz is active, but keep it reachable.
+function syncLinebedAvailability() {
+  const on = vizMode === "linebed";
+  const tab = settingsPanel.querySelector('.settings-tab[data-page="linebed"]');
+  const page = settingsPanel.querySelector('.settings-page[data-page="linebed"]');
+  tab.dataset.inactive = on ? "false" : "true";
+  page.classList.toggle("page-dim", !on);
+  lbInactiveHint.hidden = on;
+}
+
+function showSettingsPage(page) {
+  settingsTabs.forEach((t) =>
+    t.setAttribute("aria-selected", t.dataset.page === page ? "true" : "false"),
+  );
+  settingsPages.forEach((p) => {
+    p.hidden = p.dataset.page !== page;
+  });
+}
+
+function openSettings(page) {
+  syncVizPage();
+  syncMotionPanel();
+  syncLinebedPanel();
+  syncLinebedAvailability();
+  if (page) showSettingsPage(page);
+  settingsPanel.hidden = false;
+  btnSettings.setAttribute("aria-expanded", "true");
+}
+
+function closeSettings() {
+  settingsPanel.hidden = true;
+  btnSettings.setAttribute("aria-expanded", "false");
+}
+
+btnSettings.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (settingsPanel.hidden) openSettings();
+  else closeSettings();
 });
 
-updateVizButton();
+settingsPanel.addEventListener("click", (e) => e.stopPropagation());
+settingsTabs.forEach((t) =>
+  t.addEventListener("click", () => showSettingsPage(t.dataset.page)),
+);
+document.addEventListener("click", () => closeSettings());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !settingsPanel.hidden) closeSettings();
+});
+
+vizModeBtns.forEach((b) => {
+  b.addEventListener("click", () => {
+    if (!VIZ_MODES.includes(b.dataset.viz)) return;
+    vizMode = b.dataset.viz;
+    try {
+      localStorage.setItem("vizMode", vizMode);
+    } catch {}
+    syncVizPage();
+    syncLinebedAvailability();
+  });
+});
 
 // ── Linebed presets ─────────────────────────────────────────────────────
 // Two fixed presets plus an editable Custom one. Params drive both the
@@ -282,11 +360,14 @@ const LINEBED_PRESETS = {
 const LINEBED_CUSTOM_DEFAULT = { amplitude: 1.55, contrast: 1.9, velocity: 0.95, gate: 0.13, flip: true };
 let linebedPreset = "dynamic";
 let linebedCustom = { ...LINEBED_CUSTOM_DEFAULT };
+let linebedOpacity = 0.85; // global ridge opacity, applies across all presets
 try {
   const p = localStorage.getItem("linebedPreset");
   if (p && (p === "smooth" || p === "dynamic" || p === "custom")) linebedPreset = p;
   const c = JSON.parse(localStorage.getItem("linebedCustom") || "null");
   if (c && typeof c === "object") linebedCustom = { ...LINEBED_CUSTOM_DEFAULT, ...c };
+  const o = parseFloat(localStorage.getItem("linebedOpacity"));
+  if (Number.isFinite(o)) linebedOpacity = Math.max(0, Math.min(1, o));
 } catch {}
 
 function getLinebedParams() {
@@ -294,8 +375,7 @@ function getLinebedParams() {
   return LINEBED_PRESETS[linebedPreset] || LINEBED_PRESETS.smooth;
 }
 
-const linebedPanel = document.getElementById("linebed-panel");
-const btnLinebed = document.getElementById("btn-linebed");
+const lbPresets = document.getElementById("lb-presets");
 const lbSliders = document.getElementById("lb-sliders");
 const lbInputs = {
   amplitude: document.getElementById("lb-amplitude"),
@@ -304,18 +384,11 @@ const lbInputs = {
   gate: document.getElementById("lb-gate"),
 };
 const lbFlip = document.getElementById("lb-flip");
+const lbOpacity = document.getElementById("lb-opacity");
 
-function syncLinebedButton() {
-  // The preset control only applies to linebed; dim it under the other viz.
-  const on = vizMode === "linebed";
-  btnLinebed.disabled = false;
-  btnLinebed.style.opacity = on ? "" : "0.4";
-  btnLinebed.dataset.tip = on ? "Linebed presets" : "Linebed presets (switch viz first)";
-  if (!on) closeLinebedPanel();
-}
-
+// Renders the Linebed settings page; called by openSettings and on edits.
 function syncLinebedPanel() {
-  linebedPanel.querySelectorAll(".lb-preset").forEach((b) => {
+  lbPresets.querySelectorAll(".lb-preset").forEach((b) => {
     const sel = b.dataset.preset === linebedPreset;
     b.setAttribute("aria-checked", sel ? "true" : "false");
   });
@@ -325,38 +398,10 @@ function syncLinebedPanel() {
   const flip = vals.flip !== false;
   lbFlip.setAttribute("aria-checked", flip ? "true" : "false");
   lbFlip.textContent = flip ? "Newest at bottom" : "Newest at top";
+  lbOpacity.value = linebedOpacity;
 }
 
-function openLinebedPanel() {
-  if (vizMode !== "linebed") {
-    vizMode = "linebed";
-    try { localStorage.setItem("vizMode", vizMode); } catch {}
-    updateVizButton();
-    syncLinebedButton();
-  }
-  linebedPanel.hidden = false;
-  btnLinebed.setAttribute("aria-expanded", "true");
-  syncLinebedPanel();
-}
-
-function closeLinebedPanel() {
-  linebedPanel.hidden = true;
-  btnLinebed.setAttribute("aria-expanded", "false");
-}
-
-btnLinebed.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (linebedPanel.hidden) openLinebedPanel();
-  else closeLinebedPanel();
-});
-
-linebedPanel.addEventListener("click", (e) => e.stopPropagation());
-document.addEventListener("click", () => closeLinebedPanel());
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !linebedPanel.hidden) closeLinebedPanel();
-});
-
-linebedPanel.querySelectorAll(".lb-preset").forEach((b) => {
+lbPresets.querySelectorAll(".lb-preset").forEach((b) => {
   b.addEventListener("click", () => {
     linebedPreset = b.dataset.preset;
     try { localStorage.setItem("linebedPreset", linebedPreset); } catch {}
@@ -384,14 +429,17 @@ for (const k in lbInputs) {
   });
 }
 
+lbOpacity.addEventListener("input", () => {
+  linebedOpacity = Math.max(0, Math.min(1, parseFloat(lbOpacity.value)));
+  try { localStorage.setItem("linebedOpacity", linebedOpacity); } catch {}
+});
+
 lbFlip.addEventListener("click", () => {
   adoptCustom();
   linebedCustom.flip = !(linebedCustom.flip !== false);
   try { localStorage.setItem("linebedCustom", JSON.stringify(linebedCustom)); } catch {}
   syncLinebedPanel();
 });
-
-syncLinebedButton();
 
 // ── Lyrics styling + motion controls ────────────────────────────────────
 // Font, size, effect, timing offset, and a global motion multiplier (0 = still
@@ -429,8 +477,6 @@ function getLyricTime() {
   return getPlaybackTime() + lyricOffset;
 }
 
-const btnMotion = document.getElementById("btn-motion");
-const motionPanel = document.getElementById("motion-panel");
 const lmMotion = document.getElementById("lm-motion");
 const lmLabel = document.getElementById("lm-label");
 const lmFont = document.getElementById("lm-font");
@@ -450,22 +496,6 @@ function syncMotionPanel() {
   lmOffset.value = lyricOffset;
   lmOffsetLabel.textContent = `Offset ${lyricOffset > 0 ? "+" : ""}${lyricOffset.toFixed(1)}s`;
 }
-
-function closeMotionPanel() {
-  motionPanel.hidden = true;
-  btnMotion.setAttribute("aria-expanded", "false");
-}
-
-btnMotion.addEventListener("click", (e) => {
-  e.stopPropagation();
-  if (motionPanel.hidden) {
-    syncMotionPanel();
-    motionPanel.hidden = false;
-    btnMotion.setAttribute("aria-expanded", "true");
-  } else {
-    closeMotionPanel();
-  }
-});
 
 lmMotion.addEventListener("input", () => {
   lyricMotion = parseFloat(lmMotion.value);
@@ -498,17 +528,10 @@ lmOffset.addEventListener("input", () => {
   syncMotionPanel();
 });
 
-motionPanel.addEventListener("click", (e) => e.stopPropagation());
-document.addEventListener("click", () => closeMotionPanel());
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !motionPanel.hidden) closeMotionPanel();
-});
-
 btnMinimize.addEventListener("click", () => {
   const minimized = transportShell.classList.toggle("minimized");
   if (minimized) {
-    closeMotionPanel();
-    closeLinebedPanel();
+    closeSettings();
     closeCapturePanel();
   }
   btnMinimize.dataset.tip = minimized ? "Expand" : "Minimize";
@@ -1405,6 +1428,8 @@ function drawLinebed(metrics, w, h, time, dt) {
   // flip = newest row sits near/bottom (the present moment is the front line);
   // otherwise newest enters far/top and scrolls down.
   const flip = params.flip !== false;
+  const prevAlpha = ctx.globalAlpha;
+  ctx.globalAlpha = prevAlpha * linebedOpacity;
   for (let k = 0; k < rows; k++) {
     const i = flip ? rows - 1 - k : k; // history index, oldest→newest draw order
     const row = linebedHistory[i];
@@ -1447,6 +1472,7 @@ function drawLinebed(metrics, w, h, time, dt) {
     ctx.lineWidth = (1 + nearness * 0.7) * lineScale;
     ctx.stroke();
   }
+  ctx.globalAlpha = prevAlpha;
 }
 
 // ── Per-word/per-char lyrics rendering with real-time audio mapping ─────
@@ -2199,6 +2225,9 @@ function initBridge() {
         }
       });
   };
+  // Every poll: refresh the transport buttons so they track the system
+  // player's status even when it's play/paused outside the app.
+  bridge.onUpdate = () => syncPlaybackControls();
   bridge.start().then((reachable) => {
     if (reachable && !bridge.track) {
       updateLyricsStatus("Bridge connected · waiting for a track…");
