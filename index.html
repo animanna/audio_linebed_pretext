@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Lyrebed Visualizer</title>
   <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&family=Playfair+Display:wght@600;800&family=Dancing+Script:wght@600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;800&family=Space+Mono:wght@400;700&family=Playfair+Display:wght@600;800&family=Dancing+Script:wght@600;700&family=Rye&family=Orbitron:wght@500;700;900&family=Monoton&family=Righteous&family=Special+Elite&family=Pacifico&family=Reggae+One&family=Cinzel+Decorative:wght@400;700;900&family=Creepster&family=Metal+Mania&family=Bangers&family=Comfortaa:wght@300;400;700&family=Bungee+Spice&display=swap');
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
 
@@ -64,6 +64,88 @@
       #capture-indicator.active { animation: none; }
     }
 
+    /* Source link — quiet faint icon top-left, expands a label on hover using
+       the same reveal effect the lyrics use (data-anim mirrors lyricEffect). */
+    #gh-link {
+      position: fixed;
+      top: 14px;
+      left: 16px;
+      z-index: 21;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      height: 32px;
+      padding: 4px 8px;
+      border-radius: 16px;
+      color: rgba(255, 255, 255, 0.55);
+      text-decoration: none;
+      opacity: 0.45;
+      filter: drop-shadow(0 2px 7px rgba(0, 0, 0, 0.7));
+      transition: opacity 0.3s ease, background 0.3s ease, left 0.4s ease, right 0.4s ease;
+    }
+
+    #gh-link .gh-ico { flex: none; width: 24px; height: 24px; }
+    #gh-link .gh-ico svg { width: 100%; height: 100%; fill: currentColor; display: block; }
+
+    #gh-link .gh-text {
+      max-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
+      opacity: 0;
+      font-size: 14px;
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: max-width 0.38s ease, opacity 0.3s ease;
+    }
+
+    #gh-link:hover,
+    #gh-link:focus-visible {
+      opacity: 1;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.08);
+      outline: none;
+    }
+
+    #gh-link:hover .gh-text,
+    #gh-link:focus-visible .gh-text {
+      max-width: 160px;
+      opacity: 1;
+    }
+
+    /* While live capture holds the top-left, slide the link to the top-right;
+       row-reverse puts the label on the icon's left so it expands inward. */
+    #gh-link.shift-right {
+      left: auto;
+      right: 16px;
+      flex-direction: row-reverse;
+    }
+
+    /* Per-effect entrance for the expanding label — matches lyric reveal style. */
+    #gh-link[data-anim="wordwave"]:hover .gh-text,
+    #gh-link[data-anim="rise"]:hover .gh-text,
+    #gh-link[data-anim="cascade"]:hover .gh-text { animation: gh-rise 0.42s ease both; }
+    #gh-link[data-anim="zoom"]:hover .gh-text { animation: gh-zoom 0.42s ease both; transform-origin: left center; }
+    #gh-link[data-anim="reveal"]:hover .gh-text { animation: gh-wipe 0.5s ease both; }
+    /* fade uses the base opacity transition alone — no keyframe needed. */
+
+    @keyframes gh-rise {
+      from { transform: translateY(0.5em); opacity: 0; }
+      to { transform: translateY(0); opacity: 1; }
+    }
+    @keyframes gh-zoom {
+      from { transform: scale(0.6); opacity: 0; }
+      to { transform: scale(1); opacity: 1; }
+    }
+    @keyframes gh-wipe {
+      from { clip-path: inset(0 100% 0 0); opacity: 1; }
+      to { clip-path: inset(0 0 0 0); opacity: 1; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      #gh-link .gh-text,
+      #gh-link[data-anim]:hover .gh-text { animation: none; transition: opacity 0.2s ease; }
+    }
+
     .controls {
       position: fixed;
       bottom: 28px;
@@ -120,7 +202,7 @@
       background:
         linear-gradient(90deg,
           rgba(255, 255, 255, 0.92) 0%,
-          rgba(255, 167, 62, 0.88) var(--seek-progress),
+          rgba(124, 92, 255, 0.88) var(--seek-progress),
           rgba(255, 255, 255, 0.14) var(--seek-progress),
           rgba(255, 255, 255, 0.14) 100%);
       outline: none;
@@ -160,7 +242,7 @@
     .seek-bar::-moz-range-progress {
       height: 6px;
       border-radius: 999px;
-      background: linear-gradient(90deg, rgba(255, 255, 255, 0.92), rgba(255, 167, 62, 0.88));
+      background: linear-gradient(90deg, rgba(255, 255, 255, 0.92), rgba(124, 92, 255, 0.88));
     }
 
     .seek-bar::-moz-range-thumb {
@@ -290,6 +372,15 @@
       color: #ffb3b3;
     }
 
+    .emoji-btn .emoji-glyph {
+      font-size: 18px;
+      line-height: 1;
+    }
+    #btn-vocalsync[aria-pressed="true"] {
+      background: rgba(120, 190, 255, 0.22);
+      border-color: rgba(120, 190, 255, 0.7);
+    }
+
     .cap-list {
       display: flex;
       flex-direction: column;
@@ -395,9 +486,9 @@
     }
 
     .lb-preset[aria-checked="true"] {
-      background: rgba(255, 167, 62, 0.22);
-      border-color: rgba(255, 167, 62, 0.7);
-      color: #ffd9a8;
+      background: rgba(124, 92, 255, 0.22);
+      border-color: rgba(124, 92, 255, 0.7);
+      color: #cfc4ff;
     }
 
     .lb-sliders {
@@ -406,7 +497,8 @@
       gap: 11px;
     }
 
-    .lb-sliders.disabled {
+    .lb-sliders.disabled,
+    .lb-slider.disabled {
       opacity: 0.32;
       pointer-events: none;
     }
@@ -440,8 +532,8 @@
       height: 14px;
       border: 0;
       border-radius: 50%;
-      background: #ffb347;
-      box-shadow: 0 0 0 4px rgba(255, 167, 62, 0.18);
+      background: #7c5cff;
+      box-shadow: 0 0 0 4px rgba(124, 92, 255, 0.18);
     }
 
     .lb-slider input[type="range"]::-moz-range-thumb {
@@ -449,8 +541,27 @@
       height: 14px;
       border: 0;
       border-radius: 50%;
-      background: #ffb347;
+      background: #7c5cff;
     }
+
+    /* Slider keyword doubles as a reset-to-default button (data-default). */
+    .lb-slider > span[data-reset] {
+      cursor: pointer;
+      position: relative;
+    }
+    .lb-slider > span[data-reset]::after {
+      content: "";
+      position: absolute;
+      top: 50%;
+      right: -9px;
+      width: 4px;
+      height: 4px;
+      margin-top: -2px;
+      border-radius: 50%;
+      background: rgba(255, 255, 255, 0.4);
+    }
+    .lb-slider > span[data-reset]:hover { color: #b9a8ff; }
+    .lb-slider > span[data-reset]:hover::after { background: #7c5cff; }
 
     /* Stacked-label slider row (label above control) for the dual range. */
     .lb-slider-col { grid-template-columns: 1fr; gap: 6px; }
@@ -499,8 +610,52 @@
       appearance: none;
     }
 
-    .lb-select:focus { outline: none; border-color: rgba(255, 167, 62, 0.6); }
+    .lb-select:focus { outline: none; border-color: rgba(124, 92, 255, 0.6); }
     .lb-select option { background: #14141b; color: #fff; }
+
+    .lm-customfont {
+      display: grid;
+      grid-template-columns: 1fr 18px;
+      gap: 8px;
+      width: 100%;
+      min-width: 0;
+      align-items: center;
+    }
+    .lb-input {
+      width: 100%;
+      min-width: 0;
+      padding: 7px 9px;
+      font-size: 11px;
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.03em;
+      color: #fff;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 9px;
+    }
+    .lb-input:focus { outline: none; border-color: rgba(124, 92, 255, 0.6); }
+    .lb-input::placeholder { color: rgba(255, 255, 255, 0.35); }
+    /* Bare add affordance: just the icon, no box/padding; tints accent on hover. */
+    .cf-add {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      color: rgba(255, 255, 255, 0.5);
+      cursor: pointer;
+    }
+    .cf-add:hover { color: #8a6bff; }
+    .cf-add svg { width: 18px; height: 18px; display: block; }
+    .cf-hint {
+      margin: -5px 0 0 82px;
+      font-size: 10px;
+      line-height: 1.45;
+      color: rgba(255, 255, 255, 0.42);
+      font-family: 'Space Mono', monospace;
+      letter-spacing: 0.02em;
+    }
+    .cf-hint.error { color: rgba(255, 145, 145, 0.95); }
 
     .lb-flip {
       min-width: 0;
@@ -510,9 +665,9 @@
       font-family: 'Space Mono', monospace;
       letter-spacing: 0.04em;
       border-radius: 9px;
-      background: rgba(255, 167, 62, 0.18);
-      border: 1px solid rgba(255, 167, 62, 0.55);
-      color: #ffd9a8;
+      background: rgba(124, 92, 255, 0.18);
+      border: 1px solid rgba(124, 92, 255, 0.55);
+      color: #cfc4ff;
     }
 
     .lb-flip[aria-checked="false"] {
@@ -521,7 +676,22 @@
       color: rgba(255, 255, 255, 0.7);
     }
 
-    /* Settings popover: paginated tab strip + pages */
+    /* Settings popover: drag handle + section toggles + collapsible panes */
+    .settings-handle {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      height: 16px;
+      margin: -4px 0 2px;
+      color: rgba(255, 255, 255, 0.35);
+      cursor: grab;
+      touch-action: none;
+    }
+    .settings-handle:hover { color: rgba(255, 255, 255, 0.6); }
+    .settings-handle svg { width: 26px; height: 16px; fill: currentColor; }
+    .settings-panel.dragging { transition: none; cursor: grabbing; }
+    .settings-panel.dragging .settings-handle { cursor: grabbing; }
+
     .settings-tabs {
       display: flex;
       gap: 6px;
@@ -539,10 +709,10 @@
       border: 1px solid rgba(255, 255, 255, 0.12);
     }
 
-    .settings-tab[aria-selected="true"] {
-      background: rgba(255, 167, 62, 0.22);
-      border-color: rgba(255, 167, 62, 0.7);
-      color: #ffd9a8;
+    .settings-tab[aria-pressed="true"] {
+      background: rgba(124, 92, 255, 0.22);
+      border-color: rgba(124, 92, 255, 0.7);
+      color: #cfc4ff;
     }
 
     .settings-tab[data-inactive="true"] { opacity: 0.45; }
@@ -556,6 +726,68 @@
     .settings-page[hidden] { display: none; }
 
     .settings-page.page-dim { opacity: 0.4; pointer-events: none; }
+
+    .lb-dimmable { display: flex; flex-direction: column; gap: 14px; }
+    .lb-dimmable.page-dim { opacity: 0.4; pointer-events: none; }
+
+    /* Each settings section is its own floating, draggable window. */
+    .settings-window {
+      position: fixed;
+      width: min(300px, calc(100vw - 32px));
+      max-height: 82vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 16px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03)),
+        rgba(9, 9, 14, 0.9);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.55);
+      backdrop-filter: blur(18px);
+      z-index: 31;
+    }
+    .settings-window[hidden] { display: none; }
+    .settings-window.dragging { cursor: grabbing; }
+    .settings-window > .settings-page {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      padding: 12px 16px 16px;
+    }
+    .win-head {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px 8px 12px;
+      cursor: grab;
+      touch-action: none;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+    .settings-window.dragging .win-head { cursor: grabbing; }
+    .win-grip { display: inline-flex; color: rgba(255, 255, 255, 0.35); }
+    .win-grip svg { width: 22px; height: 14px; fill: currentColor; }
+    .win-title {
+      flex: 1;
+      font: 11px/1 'Space Mono', monospace;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: rgba(255, 255, 255, 0.65);
+    }
+    .win-close {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 18px;
+      height: 18px;
+      padding: 0;
+      background: none;
+      border: 0;
+      color: rgba(255, 255, 255, 0.45);
+      cursor: pointer;
+    }
+    .win-close:hover { color: #fff; }
+    .win-close svg { width: 13px; height: 13px; fill: currentColor; }
 
     .np-row {
       display: flex;
@@ -629,7 +861,7 @@
 
     .drop-card {
       padding: 40px 56px;
-      border: 2px dashed rgba(255, 167, 62, 0.8);
+      border: 2px dashed rgba(124, 92, 255, 0.8);
       border-radius: 24px;
       background: rgba(255, 255, 255, 0.04);
       font-size: 18px;
@@ -672,24 +904,39 @@
     <svg viewBox="0 0 24 24"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm7 9a7 7 0 0 1-6 6.92V22h-2v-3.08A7 7 0 0 1 5 12h2a5 5 0 0 0 10 0h2z" /></svg>
   </div>
 
+  <!-- Source link, mirrors the capture indicator's quiet top-left presence.
+       Faint by default; hover/focus turns it opaque and expands the label using
+       whichever lyric reveal effect is selected. Slides to the top-right while
+       live capture owns the top-left corner. -->
+  <a id="gh-link" href="https://github.com/animanna/audio_linebed_pretext" target="_blank" rel="noopener noreferrer" aria-label="Github Repo" data-anim="wordwave">
+    <span class="gh-ico"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2C6.48 2 2 6.58 2 12.25c0 4.53 2.87 8.37 6.84 9.73.5.1.68-.22.68-.49 0-.24-.01-.88-.01-1.73-2.78.62-3.37-1.37-3.37-1.37-.45-1.18-1.11-1.49-1.11-1.49-.91-.64.07-.62.07-.62 1 .07 1.53 1.06 1.53 1.06.89 1.56 2.34 1.11 2.91.85.09-.66.35-1.11.63-1.37-2.22-.26-4.56-1.14-4.56-5.07 0-1.12.39-2.03 1.03-2.75-.1-.26-.45-1.3.1-2.71 0 0 .84-.27 2.75 1.05A9.36 9.36 0 0 1 12 6.84c.85 0 1.71.12 2.51.34 1.91-1.32 2.75-1.05 2.75-1.05.55 1.41.2 2.45.1 2.71.64.72 1.03 1.63 1.03 2.75 0 3.94-2.34 4.81-4.57 5.06.36.32.68.95.68 1.92 0 1.39-.01 2.51-.01 2.85 0 .27.18.6.69.49A10.02 10.02 0 0 0 22 12.25C22 6.58 17.52 2 12 2z" /></svg></span>
+    <span class="gh-text">Github Repo</span>
+  </a>
+
   <div class="controls">
     <div id="settings-panel" class="linebed-panel settings-panel" role="dialog" aria-label="Settings" hidden>
-      <div class="settings-tabs" role="tablist" aria-label="Settings pages">
-        <button class="settings-tab" type="button" role="tab" data-page="viz" aria-selected="true">Visualizer</button>
-        <button class="settings-tab" type="button" role="tab" data-page="lyrics" aria-selected="false">Lyrics</button>
-        <button class="settings-tab" type="button" role="tab" data-page="audio" aria-selected="false">Audio</button>
-        <button class="settings-tab" type="button" role="tab" data-page="linebed" aria-selected="false">Linebed</button>
+      <div class="settings-handle" id="settings-handle" title="Drag to move" aria-hidden="true">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="9" cy="7" r="1.5" /><circle cx="15" cy="7" r="1.5" />
+          <circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" />
+          <circle cx="9" cy="17" r="1.5" /><circle cx="15" cy="17" r="1.5" />
+        </svg>
       </div>
-
-      <div class="settings-page" data-page="viz" role="tabpanel">
-        <div class="lb-title">Visualizer</div>
-        <div class="lb-presets" role="radiogroup" aria-label="Visualizer mode">
-          <button class="lb-preset viz-mode" type="button" role="radio" data-viz="linebed" aria-checked="false">Linebed</button>
-          <button class="lb-preset viz-mode" type="button" role="radio" data-viz="default" aria-checked="false">Bars + Wave</button>
-        </div>
+      <div class="settings-tabs" aria-label="Settings sections">
+        <button class="settings-tab" type="button" data-page="lyrics" aria-pressed="true">Lyrics</button>
+        <button class="settings-tab" type="button" data-page="audio" aria-pressed="false">Audio</button>
+        <button class="settings-tab" type="button" data-page="linebed" aria-pressed="false">Linebed</button>
+        <button class="settings-tab" type="button" data-page="vocalsync" aria-pressed="false">Vocal Sync</button>
       </div>
+    </div>
 
-      <div class="settings-page" data-page="lyrics" role="tabpanel" hidden>
+    <div class="settings-window" id="win-lyrics" data-page="lyrics" role="dialog" aria-label="Lyrics settings" hidden>
+      <div class="win-head">
+        <span class="win-grip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="1.5" /><circle cx="15" cy="7" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="17" r="1.5" /><circle cx="15" cy="17" r="1.5" /></svg></span>
+        <span class="win-title">Lyrics</span>
+        <button class="win-close" type="button" aria-label="Close" data-close="lyrics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg></button>
+      </div>
+      <div class="settings-page" data-page="lyrics">
         <div class="lb-title">Lyrics</div>
         <div class="lb-sliders">
           <label class="lb-slider"><span>Font</span>
@@ -698,29 +945,75 @@
               <option value="serif">Serif</option>
               <option value="cursive">Cursive</option>
               <option value="mono">Mono</option>
+              <option value="western">Western</option>
+              <option value="cyberpunk">Cyberpunk</option>
+              <option value="neon">Neon</option>
+              <option value="retro">Retro</option>
+              <option value="vintage">Vintage</option>
+              <option value="girly">Girly</option>
+              <option value="anime">Anime</option>
+              <option value="mystical">Mystical</option>
+              <option value="horror">Horror</option>
+              <option value="metal">Metal Band</option>
+              <option value="excited">Excited</option>
+              <option value="calm">Calm</option>
+              <option value="spice">Spice (color)</option>
             </select>
           </label>
+          <label class="lb-slider"><span>Custom font</span>
+            <span class="lm-customfont">
+              <input type="text" id="lm-customfont-input" class="lb-input" placeholder="Type a font name + Enter" autocomplete="off" spellcheck="false" />
+              <span id="lm-customfont-add" class="cf-add" role="button" tabindex="0" title="Add font" aria-label="Add font">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+              </span>
+            </span>
+          </label>
+          <div class="cf-hint" id="lm-customfont-hint">Type a name like “Molle” (or paste a fonts.google.com link) and hit Enter</div>
           <label class="lb-slider"><span id="lm-size-label">Size</span>
-            <input type="range" id="lm-size" min="0.6" max="1.6" step="0.05" />
+            <input type="range" id="lm-size" min="0.6" max="1.6" step="0.05" data-default="1" />
           </label>
           <label class="lb-slider"><span>Effect</span>
             <select id="lm-effect" class="lb-select">
               <option value="wordwave">Word wave</option>
               <option value="reveal">Reveal (L→R)</option>
               <option value="fade">Fade in</option>
+              <option value="rise">Rise up</option>
+              <option value="zoom">Zoom in</option>
+              <option value="cascade">Cascade</option>
+            </select>
+          </label>
+          <label class="lb-slider"><span>Beat</span>
+            <select id="lm-beat" class="lb-select">
+              <option value="split">Split push</option>
+              <option value="pump">Pump</option>
+              <option value="shake">Shake</option>
+              <option value="bounce">Bounce</option>
+              <option value="swing">Swing</option>
+              <option value="jelly">Jelly</option>
+              <option value="flash">Flash</option>
             </select>
           </label>
           <label class="lb-slider"><span id="lm-label">Motion</span>
-            <input type="range" id="lm-motion" min="0" max="1.4" step="0.05" />
+            <input type="range" id="lm-motion" min="0" max="1.4" step="0.05" data-default="1" />
           </label>
           <label class="lb-slider"><span id="lm-offset-label">Offset</span>
-            <input type="range" id="lm-offset" min="-3" max="3" step="0.1" />
+            <input type="range" id="lm-offset" min="-3" max="3" step="0.1" data-default="0" />
+          </label>
+          <label class="lb-slider"><span id="lm-warp-label">Warp</span>
+            <input type="range" id="lm-warp" min="-1" max="1" step="0.05" data-default="0" />
           </label>
         </div>
-        <div class="cap-hint">Motion 0% = still text. Offset nudges lyric sync. Reveal suits Cursive.</div>
+        <div class="cap-hint">Motion 0% = still text. Offset shifts sync; Warp squishes/expands word-by-word pace within each line. Reveal suits Cursive.</div>
       </div>
+    </div>
 
-      <div class="settings-page" data-page="audio" role="tabpanel" hidden>
+    <div class="settings-window" id="win-audio" data-page="audio" role="dialog" aria-label="Audio settings" hidden>
+      <div class="win-head">
+        <span class="win-grip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="1.5" /><circle cx="15" cy="7" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="17" r="1.5" /><circle cx="15" cy="17" r="1.5" /></svg></span>
+        <span class="win-title">Audio</span>
+        <button class="win-close" type="button" aria-label="Close" data-close="audio"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg></button>
+      </div>
+      <div class="settings-page" data-page="audio">
         <div class="lb-title">Audio analysis (FFT)</div>
         <div class="lb-sliders">
           <label class="lb-slider"><span>FFT size</span>
@@ -733,16 +1026,16 @@
             </select>
           </label>
           <label class="lb-slider"><span id="ft-smooth-label">Smoothing</span>
-            <input type="range" id="ft-smooth" min="0" max="0.95" step="0.01" />
+            <input type="range" id="ft-smooth" min="0" max="0.95" step="0.01" data-default="0.65" />
           </label>
           <label class="lb-slider"><span id="ft-gain-label">Gain</span>
-            <input type="range" id="ft-gain" min="0.2" max="4" step="0.05" />
+            <input type="range" id="ft-gain" min="0.2" max="4" step="0.05" data-default="1" />
           </label>
           <label class="lb-slider"><span id="ft-bass-label">Bass</span>
-            <input type="range" id="ft-bass" min="100" max="2000" step="10" />
+            <input type="range" id="ft-bass" min="100" max="2000" step="10" data-default="250" />
           </label>
           <label class="lb-slider"><span id="ft-mid-label">Mid</span>
-            <input type="range" id="ft-mid" min="400" max="10000" step="50" />
+            <input type="range" id="ft-mid" min="400" max="10000" step="50" data-default="4000" />
           </label>
           <div class="lb-slider"><span>Reset</span>
             <button type="button" id="ft-reset" class="lb-flip">Restore defaults</button>
@@ -750,10 +1043,23 @@
         </div>
         <div class="cap-hint">Higher FFT size = finer pitch detail (sharper linebed) but heavier. Bass/Mid set the band split for beat detection.</div>
       </div>
+    </div>
 
-      <div class="settings-page" data-page="linebed" role="tabpanel" hidden>
+    <div class="settings-window" id="win-linebed" data-page="linebed" role="dialog" aria-label="Linebed settings" hidden>
+      <div class="win-head">
+        <span class="win-grip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="1.5" /><circle cx="15" cy="7" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="17" r="1.5" /><circle cx="15" cy="17" r="1.5" /></svg></span>
+        <span class="win-title">Linebed</span>
+        <button class="win-close" type="button" aria-label="Close" data-close="linebed"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg></button>
+      </div>
+      <div class="settings-page" data-page="linebed">
+        <div class="lb-title">Visualizer mode</div>
+        <div class="lb-presets" role="radiogroup" aria-label="Visualizer mode">
+          <button class="lb-preset viz-mode" type="button" role="radio" data-viz="default" aria-checked="false">Bars + Wave</button>
+          <button class="lb-preset viz-mode" type="button" role="radio" data-viz="linebed" aria-checked="false">Linebed</button>
+        </div>
+        <div class="cap-hint" id="lb-inactive-hint" hidden>Switch Visualizer mode to Linebed for these to take effect.</div>
+        <div class="lb-dimmable" id="lb-body">
         <div class="lb-title">Linebed</div>
-        <div class="cap-hint" id="lb-inactive-hint" hidden>Switch Visualizer to Linebed for these to take effect.</div>
         <div class="lb-presets" id="lb-presets" role="radiogroup" aria-label="Preset">
           <button class="lb-preset" type="button" role="radio" data-preset="smooth" aria-checked="false">Smooth</button>
           <button class="lb-preset" type="button" role="radio" data-preset="dynamic" aria-checked="false">Dynamic</button>
@@ -761,27 +1067,40 @@
         </div>
         <div class="lb-sliders">
           <label class="lb-slider"><span>Opacity</span>
-            <input type="range" id="lb-opacity" min="0" max="1" step="0.01" />
+            <input type="range" id="lb-opacity" min="0" max="1" step="0.01" data-default="0.85" />
           </label>
           <label class="lb-slider"><span id="lb-duration-label">History</span>
-            <input type="range" id="lb-duration" min="0.8" max="12" step="0.1" />
+            <input type="range" id="lb-duration" min="0.8" max="12" step="0.1" data-default="1.6" />
+          </label>
+          <label class="lb-slider"><span>Flow</span>
+            <select id="lb-flow" class="lb-select">
+              <option value="log">Logarithmic (present dense)</option>
+              <option value="linear">Linear (even)</option>
+              <option value="original">Original (stepped)</option>
+            </select>
+          </label>
+          <label class="lb-slider"><span id="lb-lock-label">Lock</span>
+            <input type="range" id="lb-lock" min="25" max="300" step="5" data-default="90" />
           </label>
         </div>
         <div class="lb-sliders" id="lb-sliders">
           <label class="lb-slider"><span>Amplitude</span>
-            <input type="range" id="lb-amplitude" min="0.4" max="2.6" step="0.05" />
+            <input type="range" id="lb-amplitude" min="0.4" max="2.6" step="0.05" data-default="1.55" />
           </label>
           <label class="lb-slider"><span>Contrast</span>
-            <input type="range" id="lb-contrast" min="0.5" max="2.6" step="0.05" />
+            <input type="range" id="lb-contrast" min="0.5" max="2.6" step="0.05" data-default="1.9" />
           </label>
           <label class="lb-slider"><span>Velocity</span>
-            <input type="range" id="lb-velocity" min="0" max="1.6" step="0.05" />
+            <input type="range" id="lb-velocity" min="0" max="1.6" step="0.05" data-default="0.95" />
           </label>
           <label class="lb-slider"><span>Gate</span>
-            <input type="range" id="lb-gate" min="0" max="0.4" step="0.01" />
+            <input type="range" id="lb-gate" min="0" max="0.4" step="0.01" data-default="0.13" />
           </label>
           <div class="lb-slider"><span>Flip Y</span>
             <button type="button" id="lb-flip" class="lb-flip" role="switch" aria-checked="true">Newest at bottom</button>
+          </div>
+          <div class="lb-slider"><span>Peaks</span>
+            <button type="button" id="lb-peak" class="lb-flip" role="switch" aria-checked="false">Peak hold off</button>
           </div>
         </div>
         <div class="lb-title" style="margin-top:10px">Spectrum base</div>
@@ -802,20 +1121,76 @@
           </label>
           <div class="lb-slider lb-slider-col"><span id="ls-range-label">Range</span>
             <div class="dual-range">
-              <input type="range" id="ls-fmin" min="0" max="26000" step="50" />
-              <input type="range" id="ls-fmax" min="0" max="26000" step="50" />
+              <input type="range" id="ls-fmin" min="0" max="1000" step="1" />
+              <input type="range" id="ls-fmax" min="0" max="1000" step="1" />
             </div>
           </div>
           <label class="lb-slider" id="ls-res-wrap"><span id="ls-res-label">Resolution</span>
             <input type="range" id="ls-res" min="6" max="72" step="1" />
           </label>
           <label class="lb-slider"><span id="ls-blend-label">Peak↔Avg</span>
-            <input type="range" id="ls-blend" min="0" max="1" step="0.01" />
+            <input type="range" id="ls-blend" min="0" max="1" step="0.01" data-default="0.72" />
           </label>
         </div>
         <div class="cap-hint">Chromatic = one column per pitch step; raise “Per octave” past 12 for microtonal detail. Range sets the low/high edges (sub-bass → treble).</div>
+        </div>
       </div>
     </div>
+
+    <div class="settings-window" id="win-vocalsync" data-page="vocalsync" role="dialog" aria-label="Vocal Sync settings" hidden>
+      <div class="win-head">
+        <span class="win-grip"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="7" r="1.5" /><circle cx="15" cy="7" r="1.5" /><circle cx="9" cy="12" r="1.5" /><circle cx="15" cy="12" r="1.5" /><circle cx="9" cy="17" r="1.5" /><circle cx="15" cy="17" r="1.5" /></svg></span>
+        <span class="win-title">Vocal Sync</span>
+        <button class="win-close" type="button" aria-label="Close" data-close="vocalsync"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6.4 5l5.6 5.6L17.6 5 19 6.4 13.4 12 19 17.6 17.6 19 12 13.4 6.4 19 5 17.6 10.6 12 5 6.4z" /></svg></button>
+      </div>
+      <div class="settings-page" data-page="vocalsync">
+        <div class="lb-title">Vocal Sync (🎤 onset reveal)</div>
+        <div class="cap-hint" id="vs-inactive-hint" hidden>Turn on 🎤 in the transport bar for these to take effect.</div>
+        <div class="lb-dimmable" id="vs-body">
+          <div class="lb-title">Onset detection</div>
+          <div class="lb-sliders">
+            <label class="lb-slider"><span id="vs-threshold-label">Onset threshold</span>
+              <input type="range" id="vs-threshold" min="1" max="3" step="0.05" data-default="1.6" />
+            </label>
+            <label class="lb-slider"><span id="vs-gap-label">Min word gap</span>
+              <input type="range" id="vs-gap" min="60" max="300" step="5" data-default="120" />
+            </label>
+            <label class="lb-slider"><span id="vs-gate-label">Vocal gate</span>
+              <input type="range" id="vs-gate" min="0" max="1" step="0.02" data-default="0.4" />
+            </label>
+            <label class="lb-slider"><span id="vs-lead-label">Reveal tightness</span>
+              <input type="range" id="vs-lead" min="0" max="5" step="1" data-default="2" />
+            </label>
+            <label class="lb-slider"><span id="vs-smooth-label">Smoothing</span>
+              <input type="range" id="vs-smooth" min="0" max="0.95" step="0.01" data-default="0.5" />
+            </label>
+            <label class="lb-slider"><span id="vs-low-label">Vocal band low</span>
+              <input type="range" id="vs-low" min="120" max="500" step="5" data-default="250" />
+            </label>
+            <label class="lb-slider"><span id="vs-high-label">Vocal band high</span>
+              <input type="range" id="vs-high" min="2500" max="8000" step="50" data-default="4000" />
+            </label>
+          </div>
+          <div class="lb-title" style="margin-top:10px">Pop motion</div>
+          <div class="lb-sliders">
+            <label class="lb-slider"><span id="vs-pop-label">Pop intensity</span>
+              <input type="range" id="vs-pop" min="0" max="2" step="0.05" data-default="1" />
+            </label>
+            <label class="lb-slider"><span id="vs-decay-label">Pop decay</span>
+              <input type="range" id="vs-decay" min="200" max="1000" step="10" data-default="500" />
+            </label>
+            <label class="lb-slider"><span id="vs-glitch-label">Glitch amount</span>
+              <input type="range" id="vs-glitch" min="0" max="1" step="0.01" data-default="1" />
+            </label>
+            <div class="lb-slider"><span>Reset</span>
+              <button type="button" id="vs-reset" class="lb-flip">Restore defaults</button>
+            </div>
+          </div>
+          <div class="cap-hint">Lower threshold / gap = more, faster word pops. Vocal band low/high tighten the stem the onset detector listens to (needs stereo, centre-panned vocals). Pop controls shape the wacky motion per onset.</div>
+        </div>
+      </div>
+    </div>
+
     <div id="capture-panel" class="linebed-panel capture-panel" role="dialog" aria-label="Audio capture source" hidden>
       <div class="lb-title">Capture source</div>
       <div class="cap-list" id="cap-list"></div>
@@ -861,6 +1236,9 @@
         </button>
         <button id="btn-capture" class="icon-btn" type="button" aria-label="Capture tab or system audio" data-tip="Capture tab/system audio" aria-pressed="false">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3zm7 9a7 7 0 0 1-6 6.92V22h-2v-3.08A7 7 0 0 1 5 12h2a5 5 0 0 0 10 0h2z" /></svg>
+        </button>
+        <button id="btn-vocalsync" class="icon-btn emoji-btn" type="button" aria-label="Toggle Vocal Sync" data-tip="Vocal Sync (word reveal on vocal onsets)" aria-pressed="false">
+          <span class="emoji-glyph" aria-hidden="true">🖊️</span>
         </button>
         <button id="btn-minimize" class="icon-btn" type="button" aria-label="Minimize player" data-tip="Minimize">
           <svg class="icon-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5z" /></svg>

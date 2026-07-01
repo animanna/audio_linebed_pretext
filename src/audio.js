@@ -24,6 +24,13 @@ export class AudioEngine {
     // [bassSplitHz, midSplitHz) = mid, [midSplitHz, nyquist) = treble.
     this.bassSplitHz = 250
     this.midSplitHz = 4000
+    // Vocal Sync stem band-limit (Hz), tunable from the Vocal Sync settings tab.
+    // Highpass drops centred kick/bass; lowpass drops sibilant hiss.
+    this.vocalLowHz = 250
+    this.vocalHighHz = 4000
+    // Vocal analyser smoothing: higher = smeared transients (fewer/softer
+    // onsets), lower = sharper. Independent of the main-analyser smoothing.
+    this.vocalSmoothing = 0.5
     // Live system/tab audio capture (getDisplayMedia) state.
     this.captureMode = false
     this.captureStream = null
@@ -53,6 +60,60 @@ export class AudioEngine {
     const bufLen = this.analyser.frequencyBinCount
     this.frequencyData = new Uint8Array(bufLen)
     this.timeDomainData = new Uint8Array(bufLen)
+
+    this._initVocalGraph()
+  }
+
+  // Parallel "vocal stem" analysis path for Vocal Sync mode. Taps inputGain
+  // (every source fans into it), extracts the Mid/centre channel — where lead
+  // vocals almost always sit — then band-limits to the vocal range so the
+  // centred kick/bass and high hiss drop out. The residual is a crude vocal
+  // stem we measure rhythm (spectral flux) and volume (band RMS) from. This is
+  // the inverse of a karaoke "vocal remove" filter (which outputs L−R to cancel
+  // the centre); here we keep the centre and throw the sides away.
+  //
+  // Left untouched: the main `analyser` above still sees the full mix, so every
+  // existing visualization is unaffected.
+  _initVocalGraph() {
+    // ChannelSplitter exposes L (0) and R (1) separately. For a mono source,
+    // output 1 is silent, so Mid ≈ half-level mono — we compensate below.
+    this.vocalSplitter = this.ctx.createChannelSplitter(2)
+    this.inputGain.connect(this.vocalSplitter)
+
+    // Mid = 0.5*L + 0.5*R, summed into one node. Centre-panned vocals reinforce;
+    // hard-panned instruments partially cancel.
+    this.vocalMidGainL = this.ctx.createGain()
+    this.vocalMidGainR = this.ctx.createGain()
+    this.vocalMidGainL.gain.value = 0.5
+    this.vocalMidGainR.gain.value = 0.5
+    this.vocalSplitter.connect(this.vocalMidGainL, 0)
+    this.vocalSplitter.connect(this.vocalMidGainR, 1)
+    this.vocalMid = this.ctx.createGain()
+    this.vocalMidGainL.connect(this.vocalMid)
+    this.vocalMidGainR.connect(this.vocalMid)
+
+    // Band-limit to the vocal range: highpass kills the centred kick/bass,
+    // lowpass kills sibilant hiss above the presence band.
+    this.vocalHighpass = this.ctx.createBiquadFilter()
+    this.vocalHighpass.type = 'highpass'
+    this.vocalHighpass.frequency.value = this.vocalLowHz
+    this.vocalLowpass = this.ctx.createBiquadFilter()
+    this.vocalLowpass.type = 'lowpass'
+    this.vocalLowpass.frequency.value = this.vocalHighHz
+
+    this.vocalAnalyser = this.ctx.createAnalyser()
+    this.vocalAnalyser.fftSize = 2048 // cheap; only need band energy + flux
+    this.vocalAnalyser.smoothingTimeConstant = this.vocalSmoothing
+
+    this.vocalMid.connect(this.vocalHighpass)
+    this.vocalHighpass.connect(this.vocalLowpass)
+    this.vocalLowpass.connect(this.vocalAnalyser)
+    // Analysis-only tap — never connected to destination, so it's silent.
+
+    const vbins = this.vocalAnalyser.frequencyBinCount
+    this.vocalFreq = new Uint8Array(vbins)
+    this.vocalWave = new Uint8Array(vbins)
+    this._vocalPrevFreq = new Float32Array(vbins) // for spectral flux
   }
 
   // Wire any captured MediaStream into the analyser. Shared by the tab-share
@@ -270,6 +331,21 @@ export class AudioEngine {
     this.midSplitHz = Math.max(midHz, bassHz)
   }
 
+  // Vocal Sync stem band-limit (Hz). Stored so lazy init() seeds the biquads,
+  // and applied live when the vocal graph already exists.
+  setVocalBand(lowHz, highHz) {
+    this.vocalLowHz = lowHz
+    this.vocalHighHz = Math.max(highHz, lowHz + 200)
+    if (this.vocalHighpass) this.vocalHighpass.frequency.value = this.vocalLowHz
+    if (this.vocalLowpass) this.vocalLowpass.frequency.value = this.vocalHighHz
+  }
+
+  // Vocal analyser smoothing (0..0.95). Seeds lazy init() and applies live.
+  setVocalSmoothing(v) {
+    this.vocalSmoothing = v
+    if (this.vocalAnalyser) this.vocalAnalyser.smoothingTimeConstant = v
+  }
+
   async loadFile(file) {
     const arrayBuffer = await file.arrayBuffer()
     return this.loadArrayBuffer(arrayBuffer)
@@ -433,6 +509,69 @@ export class AudioEngine {
     rms = Math.sqrt(rms / wave.length)
 
     return { bass, mid, treble, overall, rms, frequencyData: freq, waveformData: wave, sampleRate: this.sampleRate }
+  }
+
+  // Vocal-stem metrics for the Vocal Sync onset detector. Reads the band-limited
+  // Mid-channel analyser built in _initVocalGraph. `level` is vocal-band RMS
+  // (volume, drives motion intensity); `flux` is positive spectral flux vs the
+  // previous frame (rhythm/onset signal); body/presence/sibilance are the flux
+  // split across sub-bands so the detector can route which motion style fires.
+  getVocalMetrics() {
+    if (!this.vocalAnalyser) {
+      return { level: 0, flux: 0, body: 0, presence: 0, sibilance: 0, bodyRatio: 0 }
+    }
+    this.vocalAnalyser.getByteFrequencyData(this.vocalFreq)
+    this.vocalAnalyser.getByteTimeDomainData(this.vocalWave)
+
+    const freq = this.vocalFreq
+    const wave = this.vocalWave
+    const binCount = freq.length
+    const nyquist = this.sampleRate / 2
+    const hzToBin = (hz) =>
+      Math.max(0, Math.min(binCount, Math.floor((hz / nyquist) * binCount)))
+
+    // Sub-band bin ranges (lowpass at 4 kHz caps the top).
+    const bodyStart = hzToBin(250)
+    const bodyEnd = hzToBin(2000)
+    const presEnd = hzToBin(3200)
+    // sibilance = presEnd..binCount (up to the 4 kHz cutoff)
+
+    let body = 0
+    let presence = 0
+    let sibilance = 0
+    // Band energies too (not just flux): bodyRatio = how bottom-heavy the vocal
+    // band is right now. Voiced vowels carry strong low-formant body; percussive
+    // spikes (hats, snare bleed) are top-heavy → low bodyRatio. Used as a voicing
+    // cue so those don't count as vocal onsets.
+    let bodyE = 0
+    let totalE = 0
+    const prev = this._vocalPrevFreq
+    for (let i = 0; i < binCount; i++) {
+      const e = freq[i] / 255
+      const cur = e
+      const rise = cur - prev[i]
+      prev[i] = cur
+      if (i >= bodyStart) {
+        totalE += e
+        if (i < bodyEnd) bodyE += e
+      }
+      if (rise <= 0) continue // only positive flux (onsets, not decays)
+      if (i < bodyEnd && i >= bodyStart) body += rise
+      else if (i < presEnd) presence += rise
+      else sibilance += rise
+    }
+    const flux = body + presence + sibilance
+    const bodyRatio = totalE > 0 ? bodyE / totalE : 0
+
+    // Volume: RMS of the vocal-band waveform.
+    let rms = 0
+    for (let i = 0; i < wave.length; i++) {
+      const v = (wave[i] - 128) / 128
+      rms += v * v
+    }
+    rms = Math.sqrt(rms / wave.length)
+
+    return { level: rms, flux, body, presence, sibilance, bodyRatio }
   }
 
   notifyStateChange() {

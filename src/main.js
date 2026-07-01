@@ -8,6 +8,7 @@ import {
 } from "@chenglou/pretext";
 import { AudioEngine } from "./audio.js";
 import { BeatDetector } from "./beat-detect.js";
+import { VocalOnsetDetector } from "./vocal-sync.js";
 import { getCurrentLyric, getLyricProgress } from "./lyrics.js";
 import { parseLyricsFile } from "./lrc-parser.js";
 import { fetchLyrics } from "./lyrics-fetch.js";
@@ -30,9 +31,28 @@ const DEFAULT_TRACK = {
 const EMPTY_LYRICS = [{ time: 0, text: "", emphasis: false }];
 const audio = new AudioEngine();
 const beat = new BeatDetector();
+const vocalDetector = new VocalOnsetDetector();
 const bridge = new NowPlayingBridge();
 let bridgeVersion = 0; // guards async lyric fetches against track changes
 let lyrics = EMPTY_LYRICS;
+// True only when the active lyrics carry real per-line timestamps (LRC / lrclib
+// synced). Vocal Sync reveal-gating requires this; auto-timed plain text falls
+// back to the default time-curve reveal.
+let lyricsTimed = false;
+// Vocal Sync mode (🎤): reveal words on detected vocal onsets with the wacky
+// pop motion, instead of the calm 🖊️ time-curve engine. Persisted below.
+let vocalSyncMode = false;
+try {
+  vocalSyncMode = localStorage.getItem("vocalSyncMode") === "1";
+} catch {}
+// Per-active-entry onset reveal bookkeeping (see drawLyrics).
+let vocalEntryKey = null;
+let vocalRevealCursor = 0;
+let vocalSeenOnsetId = 0;
+let vocalStarted = false; // has the active line's vocal actually started?
+let vocalLineT0 = 0; // render time the active line became current (grace timer)
+const VS_GRACE = 1.2; // s: if no vocal detected by now, even-clock takes over
+const vocalPops = new Map(); // globalWordIdx → { t0, strength, band }
 let animFrame = null;
 let lastTimestamp = 0;
 let activeTrackId = 0;
@@ -63,10 +83,12 @@ const durationLabel = document.getElementById("duration");
 const btnLoad = document.getElementById("btn-load");
 const btnCapture = document.getElementById("btn-capture");
 const captureIndicator = document.getElementById("capture-indicator");
+const ghLink = document.getElementById("gh-link");
 const capturePanel = document.getElementById("capture-panel");
 const capList = document.getElementById("cap-list");
 const capHint = document.getElementById("cap-hint");
 const btnMinimize = document.getElementById("btn-minimize");
+const btnVocalSync = document.getElementById("btn-vocalsync");
 const transportShell = document.querySelector(".transport-shell");
 const fileInput = document.getElementById("file-input");
 const dropOverlay = document.getElementById("drop-overlay");
@@ -137,8 +159,9 @@ function resetLyricVisualState() {
   lyricTransitionT = 0;
 }
 
-function setLyricsState(nextLyrics) {
+function setLyricsState(nextLyrics, timed = false) {
   lyrics = nextLyrics.length > 0 ? nextLyrics : EMPTY_LYRICS;
+  lyricsTimed = lyrics === EMPTY_LYRICS ? false : timed;
   syncPretextLocale(lyrics);
   resetLyricVisualState();
 }
@@ -157,7 +180,7 @@ function applyLyricsInput(text, filename) {
   if (parsed.length === 0) return false;
 
   const isLRC = filename.toLowerCase().endsWith(".lrc");
-  setLyricsState(parsed);
+  setLyricsState(parsed, isLRC);
 
   const count = parsed.filter((line) => line.text).length;
   const label = formatLyricsLabel(metadata, ``);
@@ -200,7 +223,7 @@ async function fetchDefaultLyrics(trackId) {
     if (trackId !== activeTrackId) return false;
 
     if (fetched && fetched.lyrics.length > 2) {
-      setLyricsState(fetched.lyrics);
+      setLyricsState(fetched.lyrics, !!fetched.source?.includes("synced"));
       const meta = fetched.meta;
       const desc = meta.artist ? `${meta.artist} — ${meta.title}` : meta.title;
       updateLyricsStatus(desc);
@@ -274,9 +297,19 @@ try {
 const btnSettings = document.getElementById("btn-settings");
 const settingsPanel = document.getElementById("settings-panel");
 const settingsTabs = settingsPanel.querySelectorAll(".settings-tab");
-const settingsPages = settingsPanel.querySelectorAll(".settings-page");
-const vizModeBtns = settingsPanel.querySelectorAll(".viz-mode");
+const settingsHandle = document.getElementById("settings-handle");
+const vizModeBtns = document.querySelectorAll(".viz-mode");
 const lbInactiveHint = document.getElementById("lb-inactive-hint");
+
+// Each settings section is its OWN floating window, so opening Audio while
+// Lyrics is open spawns a second popover instead of growing one giant panel
+// off-screen. The launcher (#settings-panel) only holds the section toggles.
+const PANE_NAMES = ["lyrics", "audio", "linebed", "vocalsync"];
+const settingsWindows = new Map();
+PANE_NAMES.forEach((name) => {
+  const el = document.getElementById(`win-${name}`);
+  if (el) settingsWindows.set(name, el);
+});
 
 function syncVizPage() {
   vizModeBtns.forEach((b) =>
@@ -284,43 +317,159 @@ function syncVizPage() {
   );
 }
 
-// Linebed params only affect the linebed visualizer; dim that page + flag its
-// tab when another viz is active, but keep it reachable.
+// Linebed params only affect the linebed visualizer; dim the param body (NOT the
+// mode switch above it) when another viz is active, but keep it reachable.
 function syncLinebedAvailability() {
   const on = vizMode === "linebed";
   const tab = settingsPanel.querySelector('.settings-tab[data-page="linebed"]');
-  const page = settingsPanel.querySelector('.settings-page[data-page="linebed"]');
-  tab.dataset.inactive = on ? "false" : "true";
-  page.classList.toggle("page-dim", !on);
+  const body = document.getElementById("lb-body");
+  if (tab) tab.dataset.inactive = on ? "false" : "true";
+  if (body) body.classList.toggle("page-dim", !on);
   lbInactiveHint.hidden = on;
 }
 
-function showSettingsPage(page) {
-  settingsTabs.forEach((t) =>
-    t.setAttribute("aria-selected", t.dataset.page === page ? "true" : "false"),
-  );
-  settingsPages.forEach((p) => {
-    p.hidden = p.dataset.page !== page;
-  });
+// Vocal Sync params only bite when 🎤 is on; dim the body (not the tab) and show
+// a hint otherwise, mirroring the linebed availability gate.
+function syncVocalSyncAvailability() {
+  const on = vocalSyncMode;
+  const tab = settingsPanel.querySelector('.settings-tab[data-page="vocalsync"]');
+  const body = document.getElementById("vs-body");
+  const hint = document.getElementById("vs-inactive-hint");
+  if (tab) tab.dataset.inactive = on ? "false" : "true";
+  if (body) body.classList.toggle("page-dim", !on);
+  if (hint) hint.hidden = on;
 }
 
-function openSettings(page) {
+function loadOpenPanes() {
+  try {
+    const a = JSON.parse(localStorage.getItem("settingsOpenPanes"));
+    if (Array.isArray(a)) {
+      const valid = a.filter((p) => PANE_NAMES.includes(p));
+      if (valid.length) return new Set(valid);
+    }
+  } catch {}
+  return new Set(["lyrics"]);
+}
+const openPanes = loadOpenPanes();
+
+// Pin an element to a free (fixed) position, clamped to the viewport.
+function pinElement(el, x, y) {
+  const w = el.offsetWidth;
+  const h = el.offsetHeight;
+  x = Math.max(8, Math.min(window.innerWidth - w - 8, x));
+  y = Math.max(8, Math.min(window.innerHeight - h - 8, y));
+  el.style.position = "fixed";
+  el.style.left = `${x}px`;
+  el.style.top = `${y}px`;
+  el.style.right = "auto";
+  el.style.bottom = "auto";
+  el.style.transform = "none";
+}
+
+function readPos(key) {
+  try {
+    const p = JSON.parse(localStorage.getItem(key));
+    if (p && Number.isFinite(p.x) && Number.isFinite(p.y)) return p;
+  } catch {}
+  return null;
+}
+
+// Make `panel` draggable by `handle`, remembering where it's dropped.
+function makeDraggable(panel, handle, key) {
+  if (!panel || !handle) return;
+  let drag = null;
+  handle.addEventListener("pointerdown", (e) => {
+    if (e.target.closest(".win-close")) return; // close icon isn't a drag grip
+    const rect = panel.getBoundingClientRect();
+    drag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+    pinElement(panel, rect.left, rect.top);
+    panel.classList.add("dragging");
+    handle.setPointerCapture(e.pointerId);
+    e.preventDefault();
+  });
+  handle.addEventListener("pointermove", (e) => {
+    if (!drag) return;
+    pinElement(panel, e.clientX - drag.dx, e.clientY - drag.dy);
+  });
+  const end = (e) => {
+    if (!drag) return;
+    drag = null;
+    panel.classList.remove("dragging");
+    try { handle.releasePointerCapture(e.pointerId); } catch {}
+    const r = panel.getBoundingClientRect();
+    try { localStorage.setItem(key, JSON.stringify({ x: r.left, y: r.top })); } catch {}
+  };
+  handle.addEventListener("pointerup", end);
+  handle.addEventListener("pointercancel", end);
+}
+
+// Cascade fresh windows down the right edge so they don't stack exactly.
+function placeWindow(name) {
+  const el = settingsWindows.get(name);
+  if (!el) return;
+  const saved = readPos(`settingsWinPos:${name}`);
+  const idx = PANE_NAMES.indexOf(name);
+  const w = el.offsetWidth || 300;
+  const pos = saved || { x: window.innerWidth - w - 24, y: 80 + idx * 46 };
+  pinElement(el, pos.x, pos.y);
+}
+
+// Show/hide each section window from (gear visible) AND (section toggled on).
+function applyWindowVisibility() {
+  const masterOn = !settingsPanel.hidden;
+  settingsWindows.forEach((el, name) => {
+    const show = masterOn && openPanes.has(name);
+    if (show) {
+      if (el.hidden) {
+        el.hidden = false;
+        placeWindow(name); // measure + position only once visible
+      }
+    } else {
+      el.hidden = true;
+    }
+  });
+  settingsTabs.forEach((t) =>
+    t.setAttribute("aria-pressed", openPanes.has(t.dataset.page) ? "true" : "false"),
+  );
+}
+
+function togglePane(name) {
+  if (!PANE_NAMES.includes(name)) return;
+  if (openPanes.has(name)) openPanes.delete(name);
+  else openPanes.add(name);
+  try {
+    localStorage.setItem("settingsOpenPanes", JSON.stringify([...openPanes]));
+  } catch {}
+  applyWindowVisibility();
+}
+
+function applyLauncherPosition() {
+  const pos = readPos("settingsPanelPos");
+  if (pos) pinElement(settingsPanel, pos.x, pos.y);
+}
+
+function openSettings() {
   syncVizPage();
   syncMotionPanel();
   syncFftPanel();
   syncLinebedPanel();
   syncLinebedSpectrumPanel();
   syncLinebedAvailability();
-  if (page) showSettingsPage(page);
+  syncVocalSyncPanel();
+  syncVocalSyncAvailability();
   settingsPanel.hidden = false;
+  applyLauncherPosition();
+  applyWindowVisibility(); // reopen whichever section windows were left open
   btnSettings.setAttribute("aria-expanded", "true");
 }
 
 function closeSettings() {
   settingsPanel.hidden = true;
+  applyWindowVisibility(); // hide the section windows along with the launcher
   btnSettings.setAttribute("aria-expanded", "false");
 }
 
+// Gear button shows/hides the launcher + its open section windows together.
 btnSettings.addEventListener("click", (e) => {
   e.stopPropagation();
   if (settingsPanel.hidden) openSettings();
@@ -329,11 +478,20 @@ btnSettings.addEventListener("click", (e) => {
 
 settingsPanel.addEventListener("click", (e) => e.stopPropagation());
 settingsTabs.forEach((t) =>
-  t.addEventListener("click", () => showSettingsPage(t.dataset.page)),
+  t.addEventListener("click", () => togglePane(t.dataset.page)),
 );
-document.addEventListener("click", () => closeSettings());
 document.addEventListener("keydown", (e) => {
   if (e.key === "Escape" && !settingsPanel.hidden) closeSettings();
+});
+
+// Launcher drags by its grip; each section window drags by its header and has a
+// close (×) that just toggles the section off.
+makeDraggable(settingsPanel, settingsHandle, "settingsPanelPos");
+settingsWindows.forEach((el, name) => {
+  el.addEventListener("click", (e) => e.stopPropagation());
+  makeDraggable(el, el.querySelector(".win-head"), `settingsWinPos:${name}`);
+  const closeBtn = el.querySelector(".win-close");
+  if (closeBtn) closeBtn.addEventListener("click", () => togglePane(name));
 });
 
 vizModeBtns.forEach((b) => {
@@ -364,6 +522,9 @@ let linebedPreset = "dynamic";
 let linebedCustom = { ...LINEBED_CUSTOM_DEFAULT };
 let linebedOpacity = 0.85; // global ridge opacity, applies across all presets
 let linebedDuration = 1.6; // seconds the row stack spans top→bottom (history depth)
+let linebedFlow = "log"; // log (present dense) | linear | original (stepped)
+let linebedLockMs = 90; // ms before the live ridge freezes into history (25–300)
+let linebedPeakHold = false; // hold per-column peaks (instant rise, slow fall)
 try {
   const p = localStorage.getItem("linebedPreset");
   if (p && (p === "smooth" || p === "dynamic" || p === "custom")) linebedPreset = p;
@@ -373,6 +534,11 @@ try {
   if (Number.isFinite(o)) linebedOpacity = Math.max(0, Math.min(1, o));
   const d = parseFloat(localStorage.getItem("linebedDuration"));
   if (Number.isFinite(d)) linebedDuration = Math.max(0.8, Math.min(12, d));
+  const fl = localStorage.getItem("linebedFlow");
+  if (fl === "log" || fl === "linear" || fl === "original") linebedFlow = fl;
+  const lk = parseFloat(localStorage.getItem("linebedLockMs"));
+  if (Number.isFinite(lk)) linebedLockMs = Math.max(25, Math.min(300, lk));
+  linebedPeakHold = localStorage.getItem("linebedPeakHold") === "1";
 } catch {}
 
 function getLinebedParams() {
@@ -392,6 +558,10 @@ const lbFlip = document.getElementById("lb-flip");
 const lbOpacity = document.getElementById("lb-opacity");
 const lbDuration = document.getElementById("lb-duration");
 const lbDurationLabel = document.getElementById("lb-duration-label");
+const lbFlow = document.getElementById("lb-flow");
+const lbLock = document.getElementById("lb-lock");
+const lbLockLabel = document.getElementById("lb-lock-label");
+const lbPeak = document.getElementById("lb-peak");
 
 // Renders the Linebed settings page; called by openSettings and on edits.
 function syncLinebedPanel() {
@@ -408,13 +578,20 @@ function syncLinebedPanel() {
   lbOpacity.value = linebedOpacity;
   lbDuration.value = linebedDuration;
   lbDurationLabel.textContent = `History ${linebedDuration.toFixed(1)}s`;
+  lbFlow.value = linebedFlow;
+  lbLock.value = linebedLockMs;
+  lbLockLabel.textContent = `Lock ${Math.round(linebedLockMs)}ms`;
+  // Lock interval only matters for the live (log/linear) modes.
+  lbLock.closest(".lb-slider").classList.toggle("disabled", linebedFlow === "original");
+  lbPeak.setAttribute("aria-checked", linebedPeakHold ? "true" : "false");
+  lbPeak.textContent = linebedPeakHold ? "Peak hold on" : "Peak hold off";
 }
 
 lbPresets.querySelectorAll(".lb-preset").forEach((b) => {
   b.addEventListener("click", () => {
     linebedPreset = b.dataset.preset;
     try { localStorage.setItem("linebedPreset", linebedPreset); } catch {}
-    linebedHistory.length = 0; // restart so new dynamics apply at once
+    linebedLocked.length = 0; // restart so new dynamics apply at once
     linebedPrevRow = null;
     syncLinebedPanel();
   });
@@ -449,6 +626,29 @@ lbDuration.addEventListener("input", () => {
   syncLinebedPanel();
 });
 
+lbFlow.addEventListener("change", () => {
+  const v = lbFlow.value;
+  linebedFlow = v === "linear" || v === "original" ? v : "log";
+  try { localStorage.setItem("linebedFlow", linebedFlow); } catch {}
+  linebedLocked.length = 0; // row semantics differ per mode — restart clean
+  linebedAccum = 0;
+  linebedPrevRow = null;
+  syncLinebedPanel();
+});
+
+lbLock.addEventListener("input", () => {
+  linebedLockMs = Math.max(25, Math.min(300, parseFloat(lbLock.value)));
+  try { localStorage.setItem("linebedLockMs", linebedLockMs); } catch {}
+  syncLinebedPanel();
+});
+
+lbPeak.addEventListener("click", () => {
+  linebedPeakHold = !linebedPeakHold;
+  try { localStorage.setItem("linebedPeakHold", linebedPeakHold ? "1" : "0"); } catch {}
+  linebedPeak = null; // restart the held envelope
+  syncLinebedPanel();
+});
+
 lbFlip.addEventListener("click", () => {
   adoptCustom();
   linebedCustom.flip = !(linebedCustom.flip !== false);
@@ -470,8 +670,29 @@ const lsResLabel = document.getElementById("ls-res-label");
 const lsBlend = document.getElementById("ls-blend");
 const lsBlendLabel = document.getElementById("ls-blend-label");
 
-// Dual-thumb Hz range: two overlaid sliders (low + high handle) over 0..fHi.
-const SPEC_GAP = 50; // min Hz between the two handles
+// Dual-thumb Hz range: two overlaid sliders (low + high handle). Travel is
+// musically logarithmic — each octave gets equal slider width — so the bass
+// gets room for definition instead of squashing into the first millimetre.
+const SPEC_GAP = 1.06; // min ratio between the two handles (~one semitone-ish)
+const SPEC_POS_MAX = 1000; // slider integer resolution
+function specPosToHz(pos) {
+  const lo = LINEBED_SPECTRUM_LIMITS.fLo;
+  const hi = LINEBED_SPECTRUM_LIMITS.fHi;
+  const t = Math.max(0, Math.min(1, pos / SPEC_POS_MAX));
+  return lo * Math.pow(hi / lo, t);
+}
+function specHzToPos(hz) {
+  const lo = LINEBED_SPECTRUM_LIMITS.fLo;
+  const hi = LINEBED_SPECTRUM_LIMITS.fHi;
+  const c = Math.max(lo, Math.min(hi, hz));
+  return Math.round((Math.log(c / lo) / Math.log(hi / lo)) * SPEC_POS_MAX);
+}
+// Round to readable Hz steps that get coarser as frequency climbs.
+function specRoundHz(hz) {
+  if (hz < 100) return Math.round(hz);
+  if (hz < 1000) return Math.round(hz / 5) * 5;
+  return Math.round(hz / 50) * 50;
+}
 
 function persistSpectrum() {
   try { localStorage.setItem("linebedSpectrum", JSON.stringify(linebedSpectrum)); } catch {}
@@ -481,8 +702,8 @@ function syncLinebedSpectrumPanel() {
   const s = linebedSpectrum;
   lsMode.value = s.mode;
   lsMag.value = s.mag;
-  lsFMin.value = s.fMin;
-  lsFMax.value = s.fMax;
+  lsFMin.value = specHzToPos(s.fMin);
+  lsFMax.value = specHzToPos(s.fMax);
   lsRange.textContent = `Range ${Math.round(s.fMin)}–${Math.round(s.fMax)} Hz`;
   const chromatic = s.mode === "chromatic";
   lsResLabel.textContent = chromatic ? `Per octave ${s.divPerOctave}` : `Columns ${s.cols}`;
@@ -516,14 +737,14 @@ lsMag.addEventListener("change", () => {
 });
 
 lsFMin.addEventListener("input", () => {
-  const hz = parseFloat(lsFMin.value);
-  linebedSpectrum.fMin = Math.min(hz, linebedSpectrum.fMax - SPEC_GAP);
+  const hz = specRoundHz(specPosToHz(parseFloat(lsFMin.value)));
+  linebedSpectrum.fMin = Math.min(hz, linebedSpectrum.fMax / SPEC_GAP);
   commitSpectrum();
 });
 
 lsFMax.addEventListener("input", () => {
-  const hz = parseFloat(lsFMax.value);
-  linebedSpectrum.fMax = Math.max(hz, linebedSpectrum.fMin + SPEC_GAP);
+  const hz = specRoundHz(specPosToHz(parseFloat(lsFMax.value)));
+  linebedSpectrum.fMax = Math.max(hz, linebedSpectrum.fMin * SPEC_GAP);
   commitSpectrum();
 });
 
@@ -548,8 +769,151 @@ const LYRIC_FONTS = {
   serif: { label: "Serif", family: '"Playfair Display"', weight: 600, emphasisWeight: 800 },
   cursive: { label: "Cursive", family: '"Dancing Script"', weight: 600, emphasisWeight: 700 },
   mono: { label: "Mono", family: '"Space Mono"', weight: 400, emphasisWeight: 700 },
+  // Themed display faces. Mostly single-weight, so emphasisWeight matches weight
+  // to avoid faux-bold synthesis (Orbitron is the one variable face here).
+  western: { label: "Western", family: '"Rye"', weight: 400, emphasisWeight: 400 },
+  cyberpunk: { label: "Cyberpunk", family: '"Orbitron"', weight: 700, emphasisWeight: 900 },
+  neon: { label: "Neon", family: '"Monoton"', weight: 400, emphasisWeight: 400 },
+  retro: { label: "Retro", family: '"Righteous"', weight: 400, emphasisWeight: 400 },
+  vintage: { label: "Vintage", family: '"Special Elite"', weight: 400, emphasisWeight: 400 },
+  // Mood faces. Single-weight unless noted, so emphasisWeight matches weight.
+  girly: { label: "Girly", family: '"Pacifico"', weight: 400, emphasisWeight: 400 },
+  anime: { label: "Anime", family: '"Reggae One"', weight: 400, emphasisWeight: 400 },
+  mystical: { label: "Mystical", family: '"Cinzel Decorative"', weight: 700, emphasisWeight: 900 },
+  horror: { label: "Horror", family: '"Creepster"', weight: 400, emphasisWeight: 400 },
+  metal: { label: "Metal Band", family: '"Metal Mania"', weight: 400, emphasisWeight: 400 },
+  excited: { label: "Excited", family: '"Bangers"', weight: 400, emphasisWeight: 400 },
+  calm: { label: "Calm", family: '"Comfortaa"', weight: 400, emphasisWeight: 700 },
+  // COLRv1 color font: glyphs paint their own gradient, fill color is ignored.
+  spice: { label: "Spice", family: '"Bungee Spice"', weight: 400, emphasisWeight: 400 },
 };
-const LYRIC_EFFECTS = ["wordwave", "reveal", "fade"];
+
+// User-imported Google Fonts. Persisted as an array of
+// { key, label, family, weight, emphasisWeight, href }; restored into
+// LYRIC_FONTS on boot and re-injected as <link> stylesheets.
+const CUSTOM_FONTS_KEY = "lyricCustomFonts";
+
+// Inject the Google Fonts stylesheet and resolve once it has actually loaded —
+// callers need the @font-face registered before they can read its style/weight.
+function injectFontStylesheet(href) {
+  const existing = document.querySelector(`link[data-fontimport="${CSS.escape(href)}"]`);
+  if (existing) return Promise.resolve();
+  return new Promise((resolve) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.dataset.fontimport = href;
+    link.addEventListener("load", () => resolve());
+    link.addEventListener("error", () => resolve());
+    document.head.appendChild(link);
+  });
+}
+
+// Build the CSS API URL for a family name WITHOUT forcing weights — many display
+// fonts are single-weight or italic-only (e.g. Molle has no upright 400 and no
+// 700), and requesting an absent weight makes Google 400 the whole stylesheet,
+// so the face never loads. Bare `family=Name` returns whatever the font ships.
+function googleFontHref(familyName) {
+  return `https://fonts.googleapis.com/css2?family=${familyName.replace(/ /g, "+")}&display=swap`;
+}
+
+// Accepts a bare family name ("Molle"), a fonts.googleapis.com CSS URL, or a
+// fonts.google.com/specimen/<Name> preview-page link (what the Google Fonts
+// site shows in the address bar). Returns { key, label, family, href } or throws.
+function parseCustomFontInput(raw) {
+  const input = String(raw || "").trim();
+  if (!input) throw new Error("Type a font name or link");
+  let familyName, href;
+  if (/^https?:\/\//i.test(input)) {
+    let url;
+    try { url = new URL(input); } catch { throw new Error("That link looks broken"); }
+    if (url.hostname === "fonts.googleapis.com") {
+      const fam = url.searchParams.get("family");
+      if (!fam) throw new Error("Link has no font in it");
+      familyName = fam.split(":")[0].replace(/\+/g, " ").trim();
+      href = url.toString();
+    } else if (url.hostname === "fonts.google.com" && /\/specimen\//.test(url.pathname)) {
+      // .../specimen/Molle  →  "Molle"
+      const seg = url.pathname.split("/specimen/")[1] || "";
+      familyName = decodeURIComponent(seg.split("/")[0]).replace(/\+/g, " ").trim();
+      if (!familyName) throw new Error("Couldn't read the font name from that link");
+      href = googleFontHref(familyName);
+    } else {
+      throw new Error("Use a fonts.google.com or fonts.googleapis.com link");
+    }
+  } else {
+    // Bare name. Keep letters/numbers/spaces only, then build the CSS URL.
+    familyName = input.replace(/[^\p{L}\p{N} ]/gu, "").replace(/\s+/g, " ").trim();
+    if (!familyName) throw new Error("That's not a usable font name");
+    href = googleFontHref(familyName);
+  }
+  return {
+    key: `custom:${familyName.toLowerCase()}`,
+    label: familyName,
+    family: `"${familyName}"`,
+    href,
+  };
+}
+
+function registerCustomFont(def) {
+  LYRIC_FONTS[def.key] = {
+    label: def.label,
+    family: def.family,
+    weight: def.weight || 400,
+    emphasisWeight: def.emphasisWeight || 400,
+    style: def.style || "",
+  };
+  injectFontStylesheet(def.href).then(() =>
+    resolveCustomFontFace(def.key, def.label),
+  );
+}
+
+// Inspect the @font-face the stylesheet registered and copy its real style and
+// weight onto the LYRIC_FONTS entry. Fixes fonts that ship only italic (Molle)
+// or a non-400 weight, which a plain "400 …px" canvas request would miss and
+// fall back to serif. Then load the actual face and re-layout if it's active.
+function resolveCustomFontFace(key, familyName) {
+  if (typeof document.fonts === "undefined") return;
+  const want = familyName.toLowerCase();
+  document.fonts.ready.then(() => {
+    let face = null;
+    document.fonts.forEach((f) => {
+      if (f.family.replace(/['"]/g, "").toLowerCase() !== want) return;
+      // Prefer a weight-400 face when several exist, else take the first.
+      if (!face || String(f.weight).startsWith("400")) face = f;
+    });
+    const entry = LYRIC_FONTS[key];
+    if (!entry) return;
+    if (face) {
+      entry.style = face.style && face.style !== "normal" ? face.style : "";
+      const w = parseInt(String(face.weight).split(/\s+/)[0], 10);
+      if (Number.isFinite(w)) {
+        entry.weight = w;
+        entry.emphasisWeight = w;
+      }
+    }
+    const probe = `${entry.style ? entry.style + " " : ""}${entry.weight} 40px ${entry.family}`;
+    document.fonts.load(probe).then(() => {
+      if (lyricFontKey === key) reflowForFontKey(key);
+    });
+  });
+}
+
+function loadCustomFonts() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(CUSTOM_FONTS_KEY) || "[]");
+    if (Array.isArray(arr)) {
+      for (const def of arr) {
+        if (def && def.key && def.family && def.href) registerCustomFont(def);
+      }
+    }
+  } catch {}
+}
+
+loadCustomFonts(); // restore before lyricFontKey is read below
+const LYRIC_EFFECTS = ["wordwave", "reveal", "fade", "rise", "zoom", "cascade"];
+// How the text reacts on each detected beat (independent of the entrance effect).
+const BEAT_EFFECTS = ["split", "pump", "shake", "bounce", "swing", "jelly", "flash"];
 
 function loadNum(key, def, lo, hi) {
   try {
@@ -562,18 +926,34 @@ function loadNum(key, def, lo, hi) {
 let lyricMotion = loadNum("lyricMotion", 1, 0, 1.4);
 let lyricFontScale = loadNum("lyricFontScale", 1, 0.6, 1.6);
 let lyricOffset = loadNum("lyricOffset", 0, -3, 3);
+let lyricWarp = loadNum("lyricWarp", 0, -1, 1);
 let lyricFontKey = "sans";
 let lyricEffect = "wordwave";
+let beatEffect = "split";
 try {
   const f = localStorage.getItem("lyricFontKey");
   if (f && LYRIC_FONTS[f]) lyricFontKey = f;
   const e = localStorage.getItem("lyricEffect");
   if (e && LYRIC_EFFECTS.includes(e)) lyricEffect = e;
+  const b = localStorage.getItem("beatEffect");
+  if (b && BEAT_EFFECTS.includes(b)) beatEffect = b;
 } catch {}
+if (ghLink) ghLink.dataset.anim = lyricEffect; // seed before settings ever open
 
 // Playback time the lyrics follow, with the user's sync offset applied.
 function getLyricTime() {
   return getPlaybackTime() + lyricOffset;
+}
+
+// Warp the linear within-line progress so the word-by-word reveal can run ahead
+// of or behind the line clock — lrclib only stamps lines, so this is the knob
+// for vocals that rush or drag inside a line. A gamma bias: warp<0 front-loads
+// (words rush early = "squish"), warp>0 back-loads (words drag = "expand"),
+// warp=0 is the original linear pacing. Monotonic, so words never un-reveal.
+function warpLyricProgress(p) {
+  if (!lyricWarp) return p;
+  const g = Math.exp(lyricWarp * 1.8); // ~0.16 … 6.0 across the slider
+  return Math.pow(clamp(p, 0, 1), g);
 }
 
 const lmMotion = document.getElementById("lm-motion");
@@ -582,8 +962,41 @@ const lmFont = document.getElementById("lm-font");
 const lmSize = document.getElementById("lm-size");
 const lmSizeLabel = document.getElementById("lm-size-label");
 const lmEffect = document.getElementById("lm-effect");
+const lmBeat = document.getElementById("lm-beat");
 const lmOffset = document.getElementById("lm-offset");
 const lmOffsetLabel = document.getElementById("lm-offset-label");
+const lmWarp = document.getElementById("lm-warp");
+const lmWarpLabel = document.getElementById("lm-warp-label");
+const lmCustomFontInput = document.getElementById("lm-customfont-input");
+const lmCustomFontAdd = document.getElementById("lm-customfont-add");
+
+// Add a font <option> to the picker if it isn't already there.
+function ensureFontOption(key, label) {
+  if (!lmFont || lmFont.querySelector(`option[value="${CSS.escape(key)}"]`)) return;
+  const opt = document.createElement("option");
+  opt.value = key;
+  opt.textContent = label;
+  lmFont.appendChild(opt);
+}
+
+// Surface every registered custom font (key starts with "custom:") in the picker.
+for (const [key, def] of Object.entries(LYRIC_FONTS)) {
+  if (key.startsWith("custom:")) ensureFontOption(key, def.label);
+}
+
+// Webfonts download async; clearing the cache now lays out with the swap
+// fallback, and clearing again once the real face is ready fixes the metrics.
+function reflowForFontKey(key) {
+  clearLocalTextCaches();
+  const def = LYRIC_FONTS[key];
+  if (!def || typeof document.fonts === "undefined") return;
+  const sty = def.style ? def.style + " " : "";
+  const probes = [
+    document.fonts.load(`${sty}${def.weight} 40px ${def.family}`),
+    document.fonts.load(`${sty}${def.emphasisWeight} 40px ${def.family}`),
+  ];
+  Promise.allSettled(probes).then(() => clearLocalTextCaches());
+}
 
 function syncMotionPanel() {
   lmMotion.value = lyricMotion;
@@ -592,8 +1005,15 @@ function syncMotionPanel() {
   lmSize.value = lyricFontScale;
   lmSizeLabel.textContent = `Size ${Math.round(lyricFontScale * 100)}%`;
   lmEffect.value = lyricEffect;
+  if (ghLink) ghLink.dataset.anim = lyricEffect; // label hover reuses lyric effect
+  lmBeat.value = beatEffect;
   lmOffset.value = lyricOffset;
   lmOffsetLabel.textContent = `Offset ${lyricOffset > 0 ? "+" : ""}${lyricOffset.toFixed(1)}s`;
+  lmWarp.value = lyricWarp;
+  lmWarpLabel.textContent =
+    lyricWarp === 0
+      ? "Warp linear"
+      : `Warp ${lyricWarp < 0 ? "squish" : "expand"} ${Math.abs(lyricWarp).toFixed(2)}`;
 }
 
 lmMotion.addEventListener("input", () => {
@@ -605,9 +1025,60 @@ lmMotion.addEventListener("input", () => {
 lmFont.addEventListener("change", () => {
   if (LYRIC_FONTS[lmFont.value]) lyricFontKey = lmFont.value;
   try { localStorage.setItem("lyricFontKey", lyricFontKey); } catch {}
-  clearLocalTextCaches(); // re-layout under the new face
+  reflowForFontKey(lyricFontKey); // re-layout under the new face
   syncMotionPanel();
 });
+
+const lmCustomFontHint = document.getElementById("lm-customfont-hint");
+const CUSTOM_FONT_HINT_DEFAULT = lmCustomFontHint ? lmCustomFontHint.textContent : "";
+
+function setCustomFontHint(msg, isError) {
+  if (!lmCustomFontHint) return;
+  lmCustomFontHint.textContent = msg || CUSTOM_FONT_HINT_DEFAULT;
+  lmCustomFontHint.classList.toggle("error", !!isError);
+}
+
+function addCustomFontFromInput() {
+  if (!lmCustomFontInput) return;
+  let def;
+  try {
+    def = parseCustomFontInput(lmCustomFontInput.value);
+  } catch (err) {
+    setCustomFontHint(err.message, true);
+    return;
+  }
+  registerCustomFont(def);
+  ensureFontOption(def.key, def.label);
+  // Persist the full list of custom fonts (de-duped by key).
+  try {
+    const arr = JSON.parse(localStorage.getItem(CUSTOM_FONTS_KEY) || "[]");
+    const list = Array.isArray(arr) ? arr.filter((d) => d && d.key !== def.key) : [];
+    list.push({ key: def.key, label: def.label, family: def.family, href: def.href });
+    localStorage.setItem(CUSTOM_FONTS_KEY, JSON.stringify(list));
+  } catch {}
+  // Select it immediately.
+  lyricFontKey = def.key;
+  try { localStorage.setItem("lyricFontKey", lyricFontKey); } catch {}
+  reflowForFontKey(lyricFontKey);
+  lmCustomFontInput.value = "";
+  setCustomFontHint(`Added “${def.label}” — applied to lyrics`, false);
+  syncMotionPanel();
+}
+
+if (lmCustomFontAdd) {
+  lmCustomFontAdd.addEventListener("click", addCustomFontFromInput);
+  lmCustomFontAdd.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") { e.preventDefault(); addCustomFontFromInput(); }
+  });
+}
+if (lmCustomFontInput) {
+  lmCustomFontInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { e.preventDefault(); addCustomFontFromInput(); }
+    else if (lmCustomFontHint && lmCustomFontHint.classList.contains("error")) {
+      setCustomFontHint("", false);
+    }
+  });
+}
 
 lmSize.addEventListener("input", () => {
   lyricFontScale = parseFloat(lmSize.value);
@@ -621,11 +1092,47 @@ lmEffect.addEventListener("change", () => {
   syncMotionPanel();
 });
 
+lmBeat.addEventListener("change", () => {
+  if (BEAT_EFFECTS.includes(lmBeat.value)) beatEffect = lmBeat.value;
+  try { localStorage.setItem("beatEffect", beatEffect); } catch {}
+  syncMotionPanel();
+});
+
 lmOffset.addEventListener("input", () => {
   lyricOffset = parseFloat(lmOffset.value);
   try { localStorage.setItem("lyricOffset", String(lyricOffset)); } catch {}
   syncMotionPanel();
 });
+
+lmWarp.addEventListener("input", () => {
+  lyricWarp = parseFloat(lmWarp.value);
+  try { localStorage.setItem("lyricWarp", String(lyricWarp)); } catch {}
+  syncMotionPanel();
+});
+
+// Default reset: each range slider carrying a data-default makes its keyword
+// label clickable (with a small dot cue). Clicking snaps the slider back to its
+// factory value and fires the same input/change events a drag would, so every
+// control's existing handler (persist + redraw) runs unchanged.
+function installSliderDefaults(root) {
+  for (const input of root.querySelectorAll("input[type=range][data-default]")) {
+    const def = parseFloat(input.dataset.default);
+    if (!Number.isFinite(def)) continue;
+    const label = input.closest(".lb-slider")?.querySelector("span");
+    if (!label) continue;
+    label.dataset.reset = "";
+    label.title = `Reset to default (${def})`;
+    label.addEventListener("click", (e) => {
+      e.preventDefault();
+      if (parseFloat(input.value) === def) return;
+      input.value = String(def);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+    });
+  }
+}
+
+installSliderDefaults(document);
 
 // ── FFT / audio-analysis controls ───────────────────────────────────────
 // Expose the AudioEngine analysis params as live sliders. Persisted; pushed to
@@ -686,7 +1193,7 @@ fftSizeSel.addEventListener("change", () => {
   fftSize = v;
   try { localStorage.setItem("fftSize", String(fftSize)); } catch {}
   audio.setFftSize(fftSize);
-  linebedHistory.length = 0; // bin count changed — drop stale rows
+  linebedLocked.length = 0; // bin count changed — drop stale rows
   linebedPrevRow = null;
 });
 
@@ -732,10 +1239,169 @@ document.getElementById("ft-reset").addEventListener("click", () => {
     localStorage.removeItem("fftMidHz");
   } catch {}
   applyFftParams();
-  linebedHistory.length = 0;
+  linebedLocked.length = 0;
   linebedPrevRow = null;
   syncFftPanel();
 });
+
+// ── Vocal Sync controls ─────────────────────────────────────────────────
+// Live knobs for the 🎤 onset engine. Detector params push into the shared
+// VocalOnsetDetector; band cutoffs into the AudioEngine vocal stem; the pop
+// motion params are read straight from these module vars in drawLyrics.
+const VOCALSYNC_DEFAULTS = {
+  threshold: 1.6,
+  minGapMs: 120,
+  gate: 0.4,
+  lead: 2,
+  smoothing: 0.5,
+  bandLowHz: 250,
+  bandHighHz: 4000,
+  popIntensity: 1,
+  popDecayMs: 500,
+  glitch: 1,
+};
+let vsThreshold = loadNum("vsThreshold", VOCALSYNC_DEFAULTS.threshold, 1, 3);
+let vsMinGapMs = loadNum("vsMinGapMs", VOCALSYNC_DEFAULTS.minGapMs, 60, 300);
+let vsGate = loadNum("vsGate", VOCALSYNC_DEFAULTS.gate, 0, 1);
+let vsLead = loadNum("vsLead", VOCALSYNC_DEFAULTS.lead, 0, 5);
+let vsSmoothing = loadNum("vsSmoothing", VOCALSYNC_DEFAULTS.smoothing, 0, 0.95);
+let vsBandLowHz = loadNum("vsBandLowHz", VOCALSYNC_DEFAULTS.bandLowHz, 120, 500);
+let vsBandHighHz = loadNum("vsBandHighHz", VOCALSYNC_DEFAULTS.bandHighHz, 2500, 8000);
+let vsPopIntensity = loadNum("vsPopIntensity", VOCALSYNC_DEFAULTS.popIntensity, 0, 2);
+let vsPopDecayMs = loadNum("vsPopDecayMs", VOCALSYNC_DEFAULTS.popDecayMs, 200, 1000);
+let vsGlitch = loadNum("vsGlitch", VOCALSYNC_DEFAULTS.glitch, 0, 1);
+
+function applyVocalSyncParams() {
+  vocalDetector.thresholdMult = vsThreshold;
+  vocalDetector.refractory = vsMinGapMs / 1000;
+  vocalDetector.gate = vsGate;
+  audio.setVocalBand(vsBandLowHz, vsBandHighHz);
+  audio.setVocalSmoothing(vsSmoothing);
+}
+applyVocalSyncParams();
+
+const vsThreshInput = document.getElementById("vs-threshold");
+const vsThreshLabel = document.getElementById("vs-threshold-label");
+const vsGapInput = document.getElementById("vs-gap");
+const vsGapLabel = document.getElementById("vs-gap-label");
+const vsGateInput = document.getElementById("vs-gate");
+const vsGateLabel = document.getElementById("vs-gate-label");
+const vsLeadInput = document.getElementById("vs-lead");
+const vsLeadLabel = document.getElementById("vs-lead-label");
+const vsSmoothInput = document.getElementById("vs-smooth");
+const vsSmoothLabel = document.getElementById("vs-smooth-label");
+const vsLowInput = document.getElementById("vs-low");
+const vsLowLabel = document.getElementById("vs-low-label");
+const vsHighInput = document.getElementById("vs-high");
+const vsHighLabel = document.getElementById("vs-high-label");
+const vsPopInput = document.getElementById("vs-pop");
+const vsPopLabel = document.getElementById("vs-pop-label");
+const vsDecayInput = document.getElementById("vs-decay");
+const vsDecayLabel = document.getElementById("vs-decay-label");
+const vsGlitchInput = document.getElementById("vs-glitch");
+const vsGlitchLabel = document.getElementById("vs-glitch-label");
+
+function syncVocalSyncPanel() {
+  if (!vsThreshInput) return;
+  vsThreshInput.value = vsThreshold;
+  vsThreshLabel.textContent = `Onset threshold ${vsThreshold.toFixed(2)}× (lower = more)`;
+  vsGapInput.value = vsMinGapMs;
+  vsGapLabel.textContent = `Min word gap ${Math.round(vsMinGapMs)} ms`;
+  vsGateInput.value = vsGate;
+  vsGateLabel.textContent = `Vocal gate ${Math.round(vsGate * 100)}% (higher = stricter)`;
+  vsLeadInput.value = vsLead;
+  vsLeadLabel.textContent = `Reveal tightness ${vsLead.toFixed(0)} word lead`;
+  vsSmoothInput.value = vsSmoothing;
+  vsSmoothLabel.textContent = `Smoothing ${Math.round(vsSmoothing * 100)}% (lower = sharper)`;
+  vsLowInput.value = vsBandLowHz;
+  vsLowLabel.textContent = `Vocal band low ${Math.round(vsBandLowHz)} Hz`;
+  vsHighInput.value = vsBandHighHz;
+  vsHighLabel.textContent = `Vocal band high ${Math.round(vsBandHighHz)} Hz`;
+  vsPopInput.value = vsPopIntensity;
+  vsPopLabel.textContent = `Pop intensity ${vsPopIntensity.toFixed(2)}×`;
+  vsDecayInput.value = vsPopDecayMs;
+  vsDecayLabel.textContent = `Pop decay ${Math.round(vsPopDecayMs)} ms`;
+  vsGlitchInput.value = vsGlitch;
+  vsGlitchLabel.textContent = `Glitch amount ${Math.round(vsGlitch * 100)}%`;
+}
+
+function bindVsSlider(input, apply) {
+  if (!input) return;
+  input.addEventListener("input", () => {
+    apply(parseFloat(input.value));
+    syncVocalSyncPanel();
+  });
+}
+bindVsSlider(vsThreshInput, (v) => {
+  vsThreshold = v;
+  try { localStorage.setItem("vsThreshold", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsGapInput, (v) => {
+  vsMinGapMs = v;
+  try { localStorage.setItem("vsMinGapMs", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsGateInput, (v) => {
+  vsGate = v;
+  try { localStorage.setItem("vsGate", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsLeadInput, (v) => {
+  vsLead = v;
+  try { localStorage.setItem("vsLead", String(v)); } catch {}
+});
+bindVsSlider(vsSmoothInput, (v) => {
+  vsSmoothing = v;
+  try { localStorage.setItem("vsSmoothing", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsLowInput, (v) => {
+  vsBandLowHz = v;
+  try { localStorage.setItem("vsBandLowHz", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsHighInput, (v) => {
+  vsBandHighHz = v;
+  try { localStorage.setItem("vsBandHighHz", String(v)); } catch {}
+  applyVocalSyncParams();
+});
+bindVsSlider(vsPopInput, (v) => {
+  vsPopIntensity = v;
+  try { localStorage.setItem("vsPopIntensity", String(v)); } catch {}
+});
+bindVsSlider(vsDecayInput, (v) => {
+  vsPopDecayMs = v;
+  try { localStorage.setItem("vsPopDecayMs", String(v)); } catch {}
+});
+bindVsSlider(vsGlitchInput, (v) => {
+  vsGlitch = v;
+  try { localStorage.setItem("vsGlitch", String(v)); } catch {}
+});
+
+const vsResetBtn = document.getElementById("vs-reset");
+if (vsResetBtn) {
+  vsResetBtn.addEventListener("click", () => {
+    vsThreshold = VOCALSYNC_DEFAULTS.threshold;
+    vsMinGapMs = VOCALSYNC_DEFAULTS.minGapMs;
+    vsGate = VOCALSYNC_DEFAULTS.gate;
+    vsLead = VOCALSYNC_DEFAULTS.lead;
+    vsSmoothing = VOCALSYNC_DEFAULTS.smoothing;
+    vsBandLowHz = VOCALSYNC_DEFAULTS.bandLowHz;
+    vsBandHighHz = VOCALSYNC_DEFAULTS.bandHighHz;
+    vsPopIntensity = VOCALSYNC_DEFAULTS.popIntensity;
+    vsPopDecayMs = VOCALSYNC_DEFAULTS.popDecayMs;
+    vsGlitch = VOCALSYNC_DEFAULTS.glitch;
+    try {
+      for (const k of [
+        "vsThreshold", "vsMinGapMs", "vsGate", "vsLead", "vsSmoothing",
+        "vsBandLowHz", "vsBandHighHz", "vsPopIntensity", "vsPopDecayMs", "vsGlitch",
+      ]) localStorage.removeItem(k);
+    } catch {}
+    applyVocalSyncParams();
+    syncVocalSyncPanel();
+  });
+}
 
 btnMinimize.addEventListener("click", () => {
   const minimized = transportShell.classList.toggle("minimized");
@@ -751,9 +1417,15 @@ btnMinimize.addEventListener("click", () => {
 });
 
 seekBar.addEventListener("input", (event) => {
+  const progress = Number.parseFloat(event.currentTarget.value) / 1000;
+  // Bridge track → seek the system player via MPRIS/SMTC; otherwise seek the
+  // locally decoded buffer.
+  if (bridge.active && bridge.track && bridge.track.length > 0) {
+    bridge.seek(progress * bridge.track.length).then(syncProgressUI);
+    syncProgressUI();
+    return;
+  }
   if (audio.duration <= 0) return;
-  const target = event.currentTarget;
-  const progress = Number.parseFloat(target.value) / 1000;
   audio.seekTo(progress * audio.duration);
   syncProgressUI();
 });
@@ -807,7 +1479,7 @@ async function fetchLyricsFor(trackId, info) {
     });
     if (trackId !== activeTrackId) return false;
     if (fetched && fetched.lyrics.length > 2) {
-      setLyricsState(fetched.lyrics);
+      setLyricsState(fetched.lyrics, !!fetched.source?.includes("synced"));
       const meta = fetched.meta;
       updateLyricsStatus(
         meta.artist ? `${meta.artist} — ${meta.title}` : meta.title,
@@ -915,6 +1587,9 @@ function syncCaptureUI() {
   // reserved for real metadata (bridge track or loaded file), never overwritten
   // with "Live capture".
   captureIndicator.classList.toggle("active", on);
+  // Capture owns the top-left; move the source link to the right so its label
+  // has room to expand without colliding with the capture indicator.
+  if (ghLink) ghLink.classList.toggle("shift-right", on);
 }
 
 function closeCapturePanel() {
@@ -1082,6 +1757,33 @@ btnCapture.addEventListener("click", (e) => {
   if (capturePanel.hidden) openCapturePanel();
   else closeCapturePanel();
 });
+
+// Vocal Sync toggle: 🖊️ (default time-curve engine) ↔ 🎤 (onset-driven reveal).
+function syncVocalSyncButton() {
+  if (!btnVocalSync) return;
+  btnVocalSync.setAttribute("aria-pressed", vocalSyncMode ? "true" : "false");
+  const glyph = btnVocalSync.querySelector(".emoji-glyph");
+  if (glyph) glyph.textContent = vocalSyncMode ? "🎤" : "🖊️";
+  btnVocalSync.dataset.tip = vocalSyncMode
+    ? "Vocal Sync ON — words pop on vocal onsets"
+    : "Vocal Sync OFF — steady word reveal";
+}
+if (btnVocalSync) {
+  syncVocalSyncButton();
+  btnVocalSync.addEventListener("click", (e) => {
+    e.stopPropagation();
+    vocalSyncMode = !vocalSyncMode;
+    try {
+      localStorage.setItem("vocalSyncMode", vocalSyncMode ? "1" : "0");
+    } catch {}
+    // Drop stale onset bookkeeping so re-enabling starts clean on the next line.
+    vocalEntryKey = null;
+    vocalRevealCursor = 0;
+    vocalPops.clear();
+    syncVocalSyncButton();
+    syncVocalSyncAvailability();
+  });
+}
 
 capturePanel.addEventListener("click", (e) => e.stopPropagation());
 document.addEventListener("click", () => closeCapturePanel());
@@ -1537,11 +2239,20 @@ function drawWaveform(metrics, w, h, time) {
 // Newest row enters far/top and scrolls toward near/bottom. Each row fills the
 // area beneath its curve with the background colour before stroking, so nearer
 // (lower) ridges occlude the rows behind them — the classic hidden-line look.
-const LINEBED_ROWS = 80;
+const LINEBED_ROWS = 80; // ridge count = vertical render resolution
 const LINEBED_BG = "#0a0a0f";
-let linebedHistory = []; // newest at index 0; each entry a Float32Array(cols)
-let linebedAccum = 0;
+const LINEBED_MAX_SAMPLES = 2048; // hard cap on committed rows (memory + pause)
+// Committed (frozen) past rows, newest at index 0: { t, data: Float32Array }.
+// Only the live front ridge is recomputed each frame; a snapshot is locked in
+// here every linebedLockMs and then never changes — it just scrolls back by
+// real elapsed time. So the present is fluid while the past holds still
+// (no inter-row morphing/ghosting).
+let linebedLocked = [];
+let linebedAccum = 0; // seconds since the last committed row
+let linebedClock = 0; // monotonic timeline seconds (sums dt)
 let linebedPrevRow = null; // last pre-velocity baseline, for transient boost
+let linebedPeak = null; // per-column held peaks (when linebedPeakHold)
+const LINEBED_PEAK_FALL = 0.85; // peak sink rate per second (lower = longer hold)
 
 // Spectrum layout: per-column frequency bands [fLoHz, fHiHz], rebuilt by
 // buildLinebedBands() whenever a spectrum setting changes. Column count is
@@ -1616,12 +2327,16 @@ function buildLinebedBands() {
     }
   }
   linebedBands = bands;
-  linebedHistory.length = 0;
+  linebedLocked.length = 0;
   linebedPrevRow = null;
+  linebedPeak = null;
 }
 buildLinebedBands();
 
-function pushLinebedRow(metrics, params) {
+// Compute one spectrum ridge from the current audio frame. Returns a fresh
+// Float32Array (no storage) — the caller decides whether to draw it live or
+// freeze it into the committed history.
+function computeLinebedRow(metrics, params, dt) {
   const bands = linebedBands;
   const cols = bands.length;
   const sr = metrics.sampleRate || 44100;
@@ -1681,91 +2396,143 @@ function pushLinebedRow(metrics, params) {
   }
   linebedPrevRow = base;
 
-  linebedHistory.unshift(row);
-  if (linebedHistory.length > LINEBED_ROWS)
-    linebedHistory.length = LINEBED_ROWS;
+  // Peak hold: each column snaps up to a new peak instantly but only sinks
+  // back at a fixed rate, so peaks "lock" in place instead of flickering.
+  if (linebedPeakHold) {
+    if (!linebedPeak || linebedPeak.length !== cols) linebedPeak = new Float32Array(cols);
+    const fall = LINEBED_PEAK_FALL * (dt > 0 ? dt : 0.016);
+    for (let c = 0; c < cols; c++) {
+      const held = linebedPeak[c] - fall;
+      const nv = row[c] > held ? row[c] : held > 0 ? held : 0;
+      linebedPeak[c] = nv;
+      row[c] = nv;
+    }
+  }
+  return row;
+}
+
+// Depth fraction (0 = front/present, 1 = deepest) → seconds into the past.
+// log packs recent history near the front (a fluid present) and compresses the
+// distant past; linear spaces time evenly across the stack.
+const LINEBED_FLOW_BASE = Math.exp(2.2); // log curve strength
+function linebedCurve(p) {
+  if (linebedFlow === "linear") return p;
+  return (Math.pow(LINEBED_FLOW_BASE, p) - 1) / (LINEBED_FLOW_BASE - 1);
+}
+
+// Per-frame perspective constants shared by every ridge.
+function linebedGeometry(w, h, params) {
+  const shellH = transportShell ? transportShell.offsetHeight : 0;
+  // Keep the front rows clear of the transport (its height + offset + gap).
+  const reserved = shellH > 0 ? shellH + 28 + 20 : 0;
+  return {
+    cx: w / 2,
+    yFar: h * 0.12,
+    yNear: Math.min(h * 1.0, h - reserved),
+    wNear: w * 1.12, // bleed past the edges so the front fills the screen
+    wFar: w * 0.52,
+    ampNear: h * 0.17 * params.amplitude,
+    ampFar: h * 0.085 * params.amplitude,
+    // Thinner ridges on narrow/mobile screens so lines don't read as heavy.
+    lineScale: w >= 900 ? 1 : w <= 420 ? 0.6 : 0.6 + ((w - 420) / 480) * 0.4,
+  };
+}
+
+// Draw a single ridge at depth d (0 = front/near, 1 = far). Fills beneath the
+// curve to occlude rows behind, then strokes it brighter/thicker when nearer.
+function drawLinebedRidge(g, data, d, h) {
+  const yBase = g.yNear + (g.yFar - g.yNear) * d;
+  const rowW = g.wNear + (g.wFar - g.wNear) * d;
+  const amp = g.ampNear + (g.ampFar - g.ampNear) * d;
+  const left = g.cx - rowW / 2;
+  const n = data.length;
+  const colStep = rowW / Math.max(1, n - 1);
+  const trace = () => {
+    for (let c = 0; c < n; c++) {
+      const x = left + c * colStep;
+      const y = yBase - data[c] * amp;
+      if (c === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+  };
+  ctx.beginPath();
+  trace();
+  ctx.lineTo(left + rowW, h);
+  ctx.lineTo(left, h);
+  ctx.closePath();
+  ctx.fillStyle = LINEBED_BG;
+  ctx.fill();
+
+  const nearness = 1 - d;
+  ctx.beginPath();
+  trace();
+  ctx.strokeStyle = `rgba(234, 238, 247, ${0.16 + nearness * 0.66})`;
+  ctx.lineWidth = (1 + nearness * 0.7) * g.lineScale;
+  ctx.stroke();
 }
 
 function drawLinebed(metrics, w, h, time, dt) {
   const params = getLinebedParams();
-  // Advance the scroll at a fixed cadence so it's frame-rate independent.
-  linebedAccum += dt;
-  // The full row stack spans linebedDuration seconds top→bottom, so each of the
-  // LINEBED_ROWS ridges represents that slice of recent history.
-  const stepInterval = linebedDuration / LINEBED_ROWS;
-  let pushed = 0;
-  while (linebedAccum >= stepInterval && pushed < 8) {
-    pushLinebedRow(metrics, params);
-    linebedAccum -= stepInterval;
-    pushed++;
-  }
-  if (linebedHistory.length === 0) pushLinebedRow(metrics, params);
-
-  const rows = linebedHistory.length;
-  const cx = w / 2;
-  // Keep the front rows clear of the transport. Reserve its measured height
-  // (plus its bottom offset and a gap) so minimizing reclaims the space.
-  const shellH = transportShell ? transportShell.offsetHeight : 0;
-  const reserved = shellH > 0 ? shellH + 28 + 20 : 0;
-  const yFar = h * 0.12;
-  const yNear = Math.min(h * 1.0, h - reserved);
-  const wNear = w * 1.12; // bleed past the edges so the front fills the screen
-  const wFar = w * 0.52;
-  const ampNear = h * 0.17 * params.amplitude;
-  const ampFar = h * 0.085 * params.amplitude;
-  // Thinner ridges on narrow/mobile screens — full-weight lines crowd the
-  // smaller field and read as heavy. Taper down toward phones.
-  const lineScale = w >= 900 ? 1 : w <= 420 ? 0.6 : 0.6 + ((w - 420) / 480) * 0.4;
-
-  // Always draw far→near so nearer fills occlude the rows behind them.
-  // flip = newest row sits near/bottom (the present moment is the front line);
-  // otherwise newest enters far/top and scrolls down.
-  const flip = params.flip !== false;
+  linebedClock += Math.max(0, dt);
+  const g = linebedGeometry(w, h, params);
+  const flip = params.flip !== false; // true = present sits near/bottom
   const prevAlpha = ctx.globalAlpha;
   ctx.globalAlpha = prevAlpha * linebedOpacity;
-  for (let k = 0; k < rows; k++) {
-    const i = flip ? rows - 1 - k : k; // history index, oldest→newest draw order
-    const row = linebedHistory[i];
-    const age = i; // 0 = newest
-    const d =
-      rows <= 1
-        ? 1
-        : flip
-          ? age / (rows - 1) // newest(age 0) → near/bottom
-          : 1 - age / (rows - 1); // newest(age 0) → far/top
-    const yBase = yNear + (yFar - yNear) * d;
-    const rowW = wNear + (wFar - wNear) * d;
-    const amp = ampNear + (ampFar - ampNear) * d;
-    const left = cx - rowW / 2;
-    const cols = row.length;
-    const colStep = rowW / Math.max(1, cols - 1);
 
-    const trace = () => {
-      for (let c = 0; c < cols; c++) {
-        const x = left + c * colStep;
-        const y = yBase - row[c] * amp;
-        if (c === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-      }
-    };
-
-    // Fill beneath the curve down to the bottom edge to hide farther rows.
-    ctx.beginPath();
-    trace();
-    ctx.lineTo(left + rowW, h);
-    ctx.lineTo(left, h);
-    ctx.closePath();
-    ctx.fillStyle = LINEBED_BG;
-    ctx.fill();
-
-    // Stroke the ridge. Nearer rows are brighter and slightly thicker.
-    const nearness = 1 - d;
-    ctx.beginPath();
-    trace();
-    ctx.strokeStyle = `rgba(234, 238, 247, ${0.16 + nearness * 0.66})`;
-    ctx.lineWidth = (1 + nearness * 0.7) * lineScale;
-    ctx.stroke();
+  if (linebedFlow === "original") {
+    // Original behaviour: a fixed stack of LINEBED_ROWS rows pushed at a steady
+    // cadence and placed by index (no live front, no time curve).
+    const stepInterval = linebedDuration / LINEBED_ROWS;
+    if (dt > 0) linebedAccum += dt;
+    let pushed = 0;
+    while (linebedAccum >= stepInterval && pushed < 8) {
+      linebedLocked.unshift({ t: linebedClock, data: computeLinebedRow(metrics, params, dt) });
+      linebedAccum -= stepInterval;
+      pushed++;
+    }
+    if (linebedLocked.length === 0)
+      linebedLocked.unshift({ t: linebedClock, data: computeLinebedRow(metrics, params, dt) });
+    if (linebedLocked.length > LINEBED_ROWS) linebedLocked.length = LINEBED_ROWS;
+    const rows = linebedLocked.length;
+    for (let k = 0; k < rows; k++) {
+      const i = flip ? rows - 1 - k : k; // oldest→newest draw order
+      const d = rows <= 1 ? 1 : flip ? i / (rows - 1) : 1 - i / (rows - 1);
+      drawLinebedRidge(g, linebedLocked[i].data, d, h);
+    }
+    ctx.globalAlpha = prevAlpha;
+    return;
   }
+
+  // Locked modes (log / linear): the live front ridge is recomputed every
+  // frame (fluid present); a snapshot is frozen into the history every
+  // linebedLockMs and only ever scrolls back by real elapsed time.
+  const live = computeLinebedRow(metrics, params, dt);
+  const lockSec = Math.max(0.005, linebedLockMs / 1000);
+  if (dt > 0) linebedAccum += dt;
+  let committed = 0;
+  while (linebedAccum >= lockSec && committed < 32) {
+    linebedLocked.unshift({ t: linebedClock, data: live });
+    linebedAccum -= lockSec;
+    committed++;
+  }
+  // Trim rows past the visible span; cap the count for memory/pause safety.
+  const maxAge = linebedDuration + 0.5;
+  while (
+    linebedLocked.length > 1 &&
+    (linebedClock - linebedLocked[linebedLocked.length - 1].t > maxAge ||
+      linebedLocked.length > LINEBED_MAX_SAMPLES)
+  )
+    linebedLocked.pop();
+
+  // Draw far→near so nearer fills occlude the rows behind: oldest committed
+  // first, then the live present ridge on top.
+  for (let j = linebedLocked.length - 1; j >= 0; j--) {
+    const timeAgo = linebedClock - linebedLocked[j].t;
+    if (timeAgo > linebedDuration) continue;
+    const sc = linebedCurve(Math.min(1, timeAgo / linebedDuration));
+    drawLinebedRidge(g, linebedLocked[j].data, flip ? sc : 1 - sc, h);
+  }
+  drawLinebedRidge(g, live, flip ? 0 : 1, h);
   ctx.globalAlpha = prevAlpha;
 }
 
@@ -1845,6 +2612,64 @@ function getMotionBias(mode) {
       };
     default:
       return { spread: 1, compression: 1, release: 1, shimmer: 1, curve: 1 };
+  }
+}
+
+// Per-token beat reaction. Returns extra transforms layered on top of the
+// entrance/motion state at draw time, selected by `beatEffect`. "split" is the
+// original contour push (handled inline in the draw loop), so it returns zeros
+// here. Everything else is a distinct, exaggerated hit-driven move.
+function getBeatTransform(state, tokenIdx, time) {
+  const m = lyricMotion;
+  const e = state.energy;
+  const hit = beat.impact; // sharp broadband transient, 0..1
+  const bass = beat.bassBeat; // low-end kick, 0..1
+  switch (beatEffect) {
+    case "pump":
+      // Big uniform punch-in on the hit (also rides the stronger global beatPump).
+      return { dx: 0, dy: 0, rot: 0, sx: hit * 0.22 * m, sy: hit * 0.22 * m, glow: hit * 12 };
+    case "shake": {
+      const amp = (bass * 0.8 + hit * 0.6) * (10 + e * 12) * m;
+      return {
+        dx: (Math.random() - 0.5) * 2 * amp,
+        dy: (Math.random() - 0.5) * 1.6 * amp,
+        rot: (Math.random() - 0.5) * 0.12 * (bass + hit) * m,
+        sx: 0,
+        sy: 0,
+        glow: hit * 8,
+      };
+    }
+    case "bounce": {
+      // Staggered upward hop riding the kick — a wave travels across the line.
+      const stagger = Math.max(0, Math.sin(time * 9 - tokenIdx * 0.7));
+      const hop = (bass * 0.9 + hit * 0.4) * (26 + e * 26) * m * stagger;
+      return { dx: 0, dy: -hop, rot: 0, sx: 0, sy: hop * 0.006, glow: bass * 7 };
+    }
+    case "swing": {
+      const dir = tokenIdx % 2 === 0 ? 1 : -1;
+      return { dx: 0, dy: 0, rot: dir * (bass * 0.32 + hit * 0.24) * m, sx: 0, sy: 0, glow: hit * 5 };
+    }
+    case "jelly": {
+      // Squash & stretch — widen and flatten on the hit, settle back.
+      const sq = (bass * 0.7 + hit * 0.6) * m;
+      return { dx: 0, dy: 0, rot: 0, sx: sq * 0.5, sy: -sq * 0.36, glow: hit * 6 };
+    }
+    case "flash": {
+      // Stays mostly still; the beat reads as a sharp brightness burst. `bright`
+      // drives an additive white overdraw in the draw loop.
+      const f = clamp(hit * 1.1 + bass * 0.5, 0, 1);
+      return {
+        dx: 0,
+        dy: 0,
+        rot: 0,
+        sx: f * 0.08,
+        sy: f * 0.08,
+        glow: hit * 30 + e * 8,
+        bright: f,
+      };
+    }
+    default:
+      return { dx: 0, dy: 0, rot: 0, sx: 0, sy: 0, glow: 0, bright: 0 };
   }
 }
 
@@ -2015,16 +2840,47 @@ function drawLyrics(metrics, w, h, time) {
 
   const palette = palettes[Math.floor(time / 15) % palettes.length];
 
-  // Dynamic font sizing — user scale, then a beat pump (scaled by motion).
+  // LAYOUT font size is frozen — it carries NO beat pump. Line breaking is a
+  // pure function of (text, font size, maxWidth), so a beat-pulsed size used to
+  // re-wrap every frame and flip words between lines near a wrap boundary
+  // (the jitter/seizure bug). The pump is reintroduced below as a purely visual
+  // scale that never touches layout, so breaks stay locked for the whole line.
   const fontDef = LYRIC_FONTS[lyricFontKey] || LYRIC_FONTS.sans;
   const baseFontSize = Math.min(w, h) * 0.06 * lyricFontScale;
   const emphasisScale = lyric.emphasis ? 1.2 : 1;
-  const beatPump = 1 + (beat.impact * 0.12 + beat.pressure * 0.08) * lyricMotion;
-  const fontSize = Math.round(baseFontSize * emphasisScale * beatPump);
+  const fontSize = Math.round(baseFontSize * emphasisScale);
   const weight = lyric.emphasis ? fontDef.emphasisWeight : fontDef.weight;
-  const font = `${weight} ${fontSize}px ${fontDef.family}`;
-  const maxWidth = w * 0.72;
-  const lineHeight = fontSize * 1.35;
+  // Some custom faces are italic-only (e.g. Molle); fontDef.style carries that
+  // so the canvas request matches the loaded @font-face instead of falling back.
+  const styPrefix = fontDef.style ? fontDef.style + " " : "";
+  const font = `${styPrefix}${weight} ${fontSize}px ${fontDef.family}`;
+  const maxWidth = w * 0.66; // narrower wrap target → more side breathing room
+  const lineHeight = fontSize * 1.5; // taller lines so wrapped lines don't crowd
+
+  // Beat pump as a COMPRESSED visual scale (applied as an outer ctx transform,
+  // never to the layout size). "pump" leans into it; "split" keeps the original
+  // feel; other effects pump mildly so they own the motion themselves.
+  const pumpGain =
+    beatEffect === "pump" ? 0.36 : beatEffect === "split" ? 0.12 : 0.03;
+  const rawPump =
+    (beat.impact * pumpGain + beat.pressure * pumpGain * 0.6) * lyricMotion;
+  // Soft-knee compressor: 1:1 up to the knee, then strongly diminishing, with a
+  // hard ceiling. Keeps loud transients from inflating text past the margins.
+  const knee = 0.06;
+  const compressed =
+    rawPump <= knee ? rawPump : knee + (rawPump - knee) / (1 + (rawPump - knee) * 7);
+  const beatPump = 1 + Math.min(compressed, 0.16);
+
+  // Beat "spread": on a hit the lines push apart vertically and words breathe
+  // apart horizontally — applied as render offsets only (never layout), so the
+  // line breaks stay locked. Capped so it opens up reasonably, not violently.
+  const spreadBeat = clamp(
+    (beat.impact * 0.6 + beat.pressure * 0.4) * lyricMotion,
+    0,
+    1,
+  );
+  const lineSpreadBeat = spreadBeat * 0.16; // extra inter-line gap (× lineHeight)
+  const wordGapBeat = spreadBeat * fontSize * 0.22; // extra px between words
 
   // Use pretext for line layout
   const prepared = getPrepared(lyric.text, font);
@@ -2075,6 +2931,75 @@ function drawLyrics(metrics, w, h, time) {
   }
   let globalWordBase = 0;
 
+  // ── Vocal Sync reveal engine ──
+  // When 🎤 is on and lyrics carry real timestamps, words reveal on detected
+  // vocal onsets — but bounded by guardrails so instruments / melisma / uneven
+  // singing can't trigger words unnaturally. Everything is computed in "front"
+  // units (the same space as the per-word phase math below): word i reveals once
+  // the front passes ~i·0.92.
+  const vocalSyncActive = vocalSyncMode && lyricsTimed && totalTokens > 0;
+  const evenFront = warpLyricProgress(progress) * (totalTokens + 0.8);
+  let vocalFront = 0;
+  if (vocalSyncActive) {
+    const entryKey = lyric.time;
+    if (entryKey !== vocalEntryKey) {
+      // New LRC line → hard resync: drop the cursor, ignore stale onsets, and
+      // re-arm the per-line vocal-start gate.
+      vocalEntryKey = entryKey;
+      vocalRevealCursor = 0;
+      vocalSeenOnsetId = vocalDetector.onsetId;
+      vocalPops.clear();
+      vocalStarted = false;
+      vocalLineT0 = time;
+    }
+
+    // Start gate: hold the whole reveal until the singer is actually present, so
+    // an instrumental intro under the first line can't creep words in. A grace
+    // cap flips it on regardless, so a missed detection never stalls the line.
+    if (vocalDetector.vocalPresent) vocalStarted = true;
+    if (time - vocalLineT0 > VS_GRACE) vocalStarted = true;
+
+    // Count onsets only after the line's vocals have started.
+    const newOnsets = vocalDetector.onsetId - vocalSeenOnsetId;
+    vocalSeenOnsetId = vocalDetector.onsetId;
+    if (vocalStarted && newOnsets > 0) {
+      vocalRevealCursor = Math.min(totalTokens, vocalRevealCursor + newOnsets);
+      // Stamp the freshly-revealed word so it pops with this onset's energy.
+      const idx = Math.min(vocalRevealCursor - 1, totalTokens - 1);
+      if (idx >= 0) {
+        vocalPops.set(idx, {
+          t0: time,
+          strength: vocalDetector.onset,
+          band: vocalDetector.onsetBand,
+        });
+      }
+    }
+
+    const onsetFront = vocalRevealCursor * 0.92;
+    // Even-clock fallback (only after vocals start): keeps words moving when
+    // onsets are sparse, so nothing gets stuck.
+    const fallbackFront = vocalStarted ? evenFront : 0;
+    // Lead-cap: onsets may lead the even pace by at most vsLead words, so a fast
+    // / melismatic half can't dump the whole line and starve the slow half.
+    const leadFront = evenFront + vsLead * 0.92;
+    const capped = Math.min(Math.max(onsetFront, fallbackFront), leadFront);
+    // Back-loaded safety net: 0 until mid-line, ramps to full by the line's end,
+    // guaranteeing completion without pacing mid-line.
+    const backload = Math.pow(Math.max(0, (progress - 0.5) / 0.5), 1.5);
+    const netFront = backload * (totalTokens + 0.8);
+    vocalFront = Math.max(capped, netFront);
+  }
+
+  // Apply the compressed beat pump as a single uniform scale about the text
+  // block centre. Because it wraps the whole render (and never the layout), the
+  // text breathes on the beat while every line break stays exactly where it was.
+  ctx.save();
+  const pumpCx = w / 2;
+  const pumpCy = baseY + totalTextHeight / 2;
+  ctx.translate(pumpCx, pumpCy);
+  ctx.scale(beatPump, beatPump);
+  ctx.translate(-pumpCx, -pumpCy);
+
   // ── Per-word drop rendering with audio-reactive transforms ──
   for (let lineIdx = 0; lineIdx < lines.length; lineIdx++) {
     const line = lines[lineIdx];
@@ -2082,7 +3007,11 @@ function drawLyrics(metrics, w, h, time) {
     const tokenCount = tokens.filter((token) => !token.isSpace).length;
     if (tokenCount === 0) continue;
 
-    const lineY = baseY + lineIdx * lineHeight;
+    // Beat opens the inter-line gaps symmetrically about the block centre, so
+    // the text stays centred while the lines push apart.
+    const lineSpread =
+      (lineIdx - (lines.length - 1) / 2) * lineHeight * lineSpreadBeat;
+    const lineY = baseY + lineIdx * lineHeight + lineSpread;
     const lineDelay = lineIdx * 0.1;
     const lineReveal = ease(
       Math.max(0, Math.min(1, (lyricRevealT - lineDelay) * 2.5)),
@@ -2098,13 +3027,17 @@ function drawLyrics(metrics, w, h, time) {
     let seenWords = 0;
     const tokenStates = tokens.map((token) => {
       if (token.isSpace) {
-        // Static width — no per-frame beat term, so the line never reflows.
-        return { ...token, reserveWidth: token.baseWidth };
+        // Layout is frozen elsewhere, so a beat term here widens the gap between
+        // words without ever changing the line breaks. Centring/fit absorb it.
+        return { ...token, reserveWidth: token.baseWidth + wordGapBeat };
       }
 
       const wordIdx = seenWords++;
       const globalWordIdx = globalWordBase + wordIdx;
-      const timingFront = progress * (totalTokens + 0.8);
+      // Vocal Sync: vocalFront already folds the even-clock fallback, lead-cap
+      // and safety net into a single guardrailed front. 🖊️ default keeps the
+      // plain even-clock reveal.
+      const timingFront = vocalSyncActive ? vocalFront : evenFront;
       const phase = clamp(timingFront - globalWordIdx * 0.92, 0, 1);
       const settle = springOut(phase);
       const charFreq = beat.getCharFrequency(
@@ -2135,36 +3068,49 @@ function drawLyrics(metrics, w, h, time) {
       let bounce =
         beat.bassBeat * clamp(phase * 1.25, 0, 1) * (8 + wordEnergy * 10);
       // Effect shaping: only the default wordwave drops/bounces per word.
-      // reveal = calm left-to-right wipe; fade = whole line eases in together.
+      // reveal = calm left-to-right wipe; fade = whole line eases in together;
+      // rise = gentle upward slide; zoom = scale-in; cascade = alternating drop.
       let revealAlpha = clamp(phase * 1.35, 0, 1);
+      let enterScale = 1;
       const calmFactor = lyricEffect === "wordwave" ? 1 : 0.35;
       if (lyricEffect !== "wordwave") {
         dropHeight = 0;
         bounce = 0;
       }
       if (lyricEffect === "fade") revealAlpha = clamp(lineReveal * 1.1, 0, 1);
+      else if (lyricEffect === "rise") dropHeight = (1 - settle) * 44;
+      else if (lyricEffect === "cascade")
+        dropHeight = (1 - settle) * 52 * (wordIdx % 2 === 0 ? 1 : -1);
+      else if (lyricEffect === "zoom")
+        enterScale = 0.6 + clamp(phase * 1.3, 0, 1) * 0.4;
       const swingX =
         position *
         (motion.spread * (18 + edgeBias * 12) - motion.compression * 6);
       const rippleX =
         Math.sin(time * 3.0 + wordIdx * 0.8 + lineIdx * 0.35) *
         (motion.shimmer * 1.2 + wordEnergy * 0.8);
-      const scaleX = clamp(
-        1 +
-          (motion.spread * 0.1 + beat.splitPulse * 0.08 + wordEnergy * 0.06) *
-            lyricMotion,
-        0.92,
-        1.38,
-      );
-      const scaleY = clamp(
-        1 +
-          ((1 - clamp(phase, 0, 1)) * 0.18 -
-            beat.splitPulse * 0.035 +
-            motion.release * 0.05) *
-            lyricMotion,
-        0.9,
-        1.34,
-      );
+      // The per-beat scale pulse belongs to the "split" beat effect only — other
+      // effects own the beat reaction themselves (see getBeatTransform), so it's
+      // gated here to keep them visibly distinct.
+      const beatSplit = beatEffect === "split" ? beat.splitPulse : 0;
+      const scaleX =
+        clamp(
+          1 +
+            (motion.spread * 0.1 + beatSplit * 0.08 + wordEnergy * 0.06) *
+              lyricMotion,
+          0.92,
+          1.38,
+        ) * enterScale;
+      const scaleY =
+        clamp(
+          1 +
+            ((1 - clamp(phase, 0, 1)) * 0.18 -
+              beatSplit * 0.035 +
+              motion.release * 0.05) *
+              lyricMotion,
+          0.9,
+          1.34,
+        ) * enterScale;
       const rotation =
         (motion.rotation * 1.2 +
           lineTilt * position +
@@ -2179,6 +3125,47 @@ function drawLyrics(metrics, w, h, time) {
       // Static reserve width (baseWidth + fixed pad) → stable line, no reflow.
       const reserveWidth = token.baseWidth + 14;
 
+      // ── Vocal Sync pop layer ──
+      // An onset-driven burst layered over the base transform: spring overshoot
+      // + liquid wobble, scaled by onset strength and routed by sub-band (body =
+      // heavy slam, sibilance = sharp glitch jitter). `vocalGlitch` flags the
+      // RGB-split draw pass below. Decays over ~0.5s from the onset moment.
+      let popScaleX = 0;
+      let popScaleY = 0;
+      let popOffX = 0;
+      let popOffY = 0;
+      let popRot = 0;
+      let popGlow = 0;
+      let vocalGlitch = 0;
+      if (vocalSyncActive) {
+        const pop = vocalPops.get(globalWordIdx);
+        if (pop) {
+          const env = Math.max(0, 1 - (time - pop.t0) / (vsPopDecayMs / 1000));
+          if (env > 0) {
+            const s = pop.strength * env * lyricMotion * vsPopIntensity;
+            const sharp = pop.band === "sibilance";
+            const heavy = pop.band === "body";
+            const overshoot = springOut(1 - env); // ~1 at fire, eases out
+            popScaleX += s * (heavy ? 0.5 : 0.32) * (0.4 + overshoot * 0.6);
+            popScaleY += s * (heavy ? 0.55 : 0.3) * (0.4 + overshoot * 0.6);
+            // Liquid stretch: taffy wobble sustained by the live vocal level.
+            const wob =
+              Math.sin(time * 22 + globalWordIdx) *
+              s *
+              (0.12 + vocalDetector.level * 0.5);
+            popScaleX += wob;
+            popScaleY -= wob * 0.8;
+            // Glitch jitter: sharpest on sibilants.
+            const jitter = sharp ? s : s * 0.35;
+            popOffX += (Math.random() * 2 - 1) * jitter * (sharp ? 14 : 6);
+            popOffY += (Math.random() * 2 - 1) * jitter * (sharp ? 10 : 4);
+            popRot += (Math.random() * 2 - 1) * jitter * 0.12;
+            popGlow += s * 18;
+            vocalGlitch = sharp ? env * pop.strength * vsGlitch : 0;
+          }
+        }
+      }
+
       return {
         ...token,
         wordIdx,
@@ -2187,13 +3174,14 @@ function drawLyrics(metrics, w, h, time) {
         phase,
         settle,
         reserveWidth,
-        scaleX,
-        scaleY,
-        offsetX,
-        offsetY,
-        rotation,
+        scaleX: scaleX + popScaleX,
+        scaleY: scaleY + popScaleY,
+        offsetX: offsetX + popOffX,
+        offsetY: offsetY + popOffY,
+        rotation: rotation + popRot,
         alpha: revealAlpha * (0.84 + beat.impact * 0.16 * lyricMotion),
-        glow: motion.glow + wordEnergy * 10,
+        glow: motion.glow + wordEnergy * 10 + popGlow,
+        vocalGlitch,
         position,
       };
     });
@@ -2204,7 +3192,7 @@ function drawLyrics(metrics, w, h, time) {
     );
     // Shrink-to-fit: keep the whole line inside a visible side margin so the
     // first/last words never run off-screen. Gutter ≈8%, capped at 10%.
-    const margin = Math.min(w * 0.1, Math.max(24, w * 0.08));
+    const margin = Math.min(w * 0.13, Math.max(28, w * 0.1));
     const safeWidth = w - margin * 2;
     const fit = totalTokenWidth > safeWidth ? safeWidth / totalTokenWidth : 1;
     const lineStartX = (w - totalTokenWidth * fit) / 2;
@@ -2227,6 +3215,10 @@ function drawLyrics(metrics, w, h, time) {
       });
 
       if (!state.isSpace) {
+        // Selected beat reaction. `sp` keeps the original contour-split move
+        // exclusive to the "split" effect; `bm` carries every other effect.
+        const bm = getBeatTransform(state, tokenIdx, time);
+        const sp = beatEffect === "split" ? beat.splitPulse : 0;
         const splitDirection =
           state.position === 0
             ? tokenIdx % 2 === 0
@@ -2234,7 +3226,7 @@ function drawLyrics(metrics, w, h, time) {
               : 1
             : Math.sign(state.position);
         const splitStrength =
-          beat.splitPulse *
+          sp *
           (0.4 + state.energy * 0.9) *
           (0.55 + Math.abs(state.position) * 0.85) *
           lyricMotion;
@@ -2244,6 +3236,7 @@ function drawLyrics(metrics, w, h, time) {
         const drawX = clamp(
           tokenBaseX +
             (state.offsetX +
+              bm.dx +
               contour.normalX * splitNormal +
               contour.tangentX * splitTangent) *
               fit,
@@ -2254,12 +3247,14 @@ function drawLyrics(metrics, w, h, time) {
           lineY +
           contour.y +
           state.offsetY +
+          bm.dy +
           contour.normalY * splitNormal +
           contour.tangentY * splitTangent;
         const drawRotation =
           contour.angle * 0.88 +
           state.rotation +
-          splitDirection * beat.splitPulse * 0.06 * lyricMotion;
+          bm.rot +
+          splitDirection * sp * 0.06 * lyricMotion;
 
         const colorIdx = (state.wordIdx + lineIdx * 2) % palette.length;
         const colorBase = palette[colorIdx];
@@ -2286,17 +3281,47 @@ function drawLyrics(metrics, w, h, time) {
         ctx.translate(drawX, drawY + fontSize / 2);
         ctx.rotate(drawRotation);
         ctx.scale(
-          state.scaleX + (beat.splitPulse * 0.12 + state.energy * 0.05) * lyricMotion,
-          state.scaleY + (-beat.splitPulse * 0.04 + state.energy * 0.03) * lyricMotion,
+          state.scaleX + bm.sx + (sp * 0.12 + state.energy * 0.05) * lyricMotion,
+          state.scaleY + bm.sy + (-sp * 0.04 + state.energy * 0.03) * lyricMotion,
         );
         ctx.globalAlpha = state.alpha;
         ctx.font = font;
         ctx.textBaseline = "top";
         ctx.shadowColor = lyric.emphasis ? colorBase : "rgba(255,255,255,0.52)";
         ctx.shadowBlur =
-          state.glow + state.charFreq * 18 + beat.splitPulse * 10;
+          state.glow + state.charFreq * 18 + sp * 10 + bm.glow;
+
+        // Vocal Sync glitch: RGB-split ghosts behind the crisp word on sibilant
+        // onsets, settling as the pop decays.
+        if (state.vocalGlitch > 0.05) {
+          const gx = state.vocalGlitch * 6;
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.globalAlpha = state.alpha * state.vocalGlitch * 0.6;
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = "rgba(255,0,80,0.9)";
+          ctx.fillText(state.text, -state.baseWidth / 2 - gx, -fontSize / 2);
+          ctx.fillStyle = "rgba(0,220,255,0.9)";
+          ctx.fillText(state.text, -state.baseWidth / 2 + gx, -fontSize / 2);
+          ctx.restore();
+        }
+
         ctx.fillStyle = charColor;
         ctx.fillText(state.text, -state.baseWidth / 2, -fontSize / 2);
+
+        // Flash effect: additive white burst on the beat, so the word visibly
+        // lights up rather than just gaining a soft glow.
+        const bright = bm.bright || 0;
+        if (bright > 0.02) {
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.globalAlpha = Math.min(1, bright) * state.alpha;
+          ctx.shadowBlur = state.glow + bm.glow;
+          ctx.shadowColor = "rgba(255,255,255,0.9)";
+          ctx.fillStyle = "#ffffff";
+          ctx.fillText(state.text, -state.baseWidth / 2, -fontSize / 2);
+          ctx.restore();
+        }
 
         if (lyric.emphasis && (state.energy > 0.45 || beat.surge > 0.35)) {
           ctx.shadowBlur *= 1.18 + beat.impact * 0.18;
@@ -2321,6 +3346,8 @@ function drawLyrics(metrics, w, h, time) {
 
     globalWordBase += tokenCount;
   }
+
+  ctx.restore(); // pop the beat-pump scale
 }
 
 // ── Context lyrics ─────────────────────────────────────────────────────
@@ -2417,6 +3444,16 @@ function render(timestamp) {
 
   // Update beat detector
   beat.update(metrics, dt);
+  // Update vocal-onset detector (Vocal Sync mode). Skipped when off so the extra
+  // analyser reads and flux math don't run needlessly.
+  if (vocalSyncMode) {
+    vocalDetector.update(
+      audio.playing
+        ? audio.getVocalMetrics()
+        : { level: 0, flux: 0, body: 0, presence: 0, sibilance: 0 },
+      dt,
+    );
+  }
   updateMotionMode(metrics, dt);
 
   // Beat flash overlay (skip under linebed to keep its lines crisp)
@@ -2496,6 +3533,28 @@ function initBridge() {
     const label = bridgeLabel(track);
     nowPlaying.textContent = label;
     setLyricsState(EMPTY_LYRICS);
+
+    // Embedded lyrics first: the player may expose xesam:asText (a loaded .lrc
+    // or tag lyrics). Use them before hitting the network. Synced [mm:ss] text
+    // parses as LRC; anything else is auto-timed plain text across the track.
+    const embedded = (track.lyrics || "").trim();
+    if (embedded) {
+      const synced = /\[\d{1,3}:\d{2}/.test(embedded);
+      const { lyrics: parsed } = parseLyricsFile(
+        embedded,
+        synced ? "embedded.lrc" : "embedded.txt",
+        track.length || undefined,
+      );
+      if (parsed && parsed.filter((l) => l.text).length > 0) {
+        setLyricsState(parsed, synced);
+        const lines = parsed.filter((l) => l.text).length;
+        updateLyricsStatus(
+          `${label} · ${lines} lines (embedded${synced ? ", synced" : ""})`,
+        );
+        return;
+      }
+    }
+
     updateLyricsStatus(`${label} · fetching lyrics…`);
     fetchLyrics({
       title: track.title,
@@ -2506,7 +3565,7 @@ function initBridge() {
       .then((fetched) => {
         if (version !== bridgeVersion) return; // track changed mid-fetch
         if (fetched && fetched.lyrics.length > 0) {
-          setLyricsState(fetched.lyrics);
+          setLyricsState(fetched.lyrics, !!fetched.source?.includes("synced"));
           const lines = fetched.lyrics.filter((l) => l.text).length;
           updateLyricsStatus(`${label} · ${lines} lines (lrclib)`);
         } else {
