@@ -435,7 +435,17 @@
 
     /* Hide-UI toggle: fades all chrome except the canvas. ui-peek is the
        escape hatch (see main.js) that lets pointer movement/tap temporarily
-       reveal everything again while ui-hidden is still set. */
+       reveal everything again while ui-hidden is still set. Reveal is quick;
+       fading back out after idle is slower so it doesn't feel abrupt. */
+    body.ui-hidden.ui-peek #gh-link,
+    body.ui-hidden.ui-peek #capture-indicator,
+    body.ui-hidden.ui-peek .transport-shell,
+    body.ui-hidden.ui-peek #settings-panel,
+    body.ui-hidden.ui-peek #capture-panel,
+    body.ui-hidden.ui-peek .settings-window {
+      transition: opacity 0.15s ease;
+    }
+
     body.ui-hidden:not(.ui-peek) #gh-link,
     body.ui-hidden:not(.ui-peek) #capture-indicator,
     body.ui-hidden:not(.ui-peek) .transport-shell,
@@ -444,7 +454,7 @@
     body.ui-hidden:not(.ui-peek) .settings-window {
       opacity: 0;
       pointer-events: none;
-      transition: opacity 0.25s ease;
+      transition: opacity 0.4s ease;
     }
 
     @media (prefers-reduced-motion: reduce) {
