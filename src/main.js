@@ -88,6 +88,7 @@ const capturePanel = document.getElementById("capture-panel");
 const capList = document.getElementById("cap-list");
 const capHint = document.getElementById("cap-hint");
 const btnMinimize = document.getElementById("btn-minimize");
+const btnHideUi = document.getElementById("btn-hide-ui");
 const btnVocalSync = document.getElementById("btn-vocalsync");
 const transportShell = document.querySelector(".transport-shell");
 const fileInput = document.getElementById("file-input");
@@ -1414,6 +1415,14 @@ btnMinimize.addEventListener("click", () => {
     "aria-label",
     minimized ? "Expand player" : "Minimize player",
   );
+});
+
+btnHideUi.addEventListener("click", () => {
+  const hidden = document.body.classList.toggle("ui-hidden");
+  document.body.classList.remove("ui-peek");
+  btnHideUi.setAttribute("aria-pressed", hidden ? "true" : "false");
+  btnHideUi.dataset.tip = hidden ? "Show UI" : "Hide UI";
+  btnHideUi.setAttribute("aria-label", hidden ? "Show UI" : "Hide UI");
 });
 
 seekBar.addEventListener("input", (event) => {
