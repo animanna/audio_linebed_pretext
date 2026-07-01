@@ -305,7 +305,7 @@ const lbInactiveHint = document.getElementById("lb-inactive-hint");
 // Each settings section is its OWN floating window, so opening Audio while
 // Lyrics is open spawns a second popover instead of growing one giant panel
 // off-screen. The launcher (#settings-panel) only holds the section toggles.
-const PANE_NAMES = ["lyrics", "audio", "linebed", "vocalsync"];
+const PANE_NAMES = ["lyrics", "audio", "linebed", "vocalsync", "display"];
 const settingsWindows = new Map();
 PANE_NAMES.forEach((name) => {
   const el = document.getElementById(`win-${name}`);
@@ -458,6 +458,7 @@ function openSettings() {
   syncLinebedAvailability();
   syncVocalSyncPanel();
   syncVocalSyncAvailability();
+  syncDisplayPanel();
   settingsPanel.hidden = false;
   applyLauncherPosition();
   applyWindowVisibility(); // reopen whichever section windows were left open
@@ -1439,6 +1440,20 @@ function peekUi() {
 }
 document.addEventListener("pointermove", peekUi);
 document.addEventListener("touchstart", peekUi, { passive: true });
+
+const uiHideDelayInput = document.getElementById("ui-hide-delay");
+const uiHideDelayLabel = document.getElementById("ui-hide-delay-label");
+
+function syncDisplayPanel() {
+  uiHideDelayInput.value = uiHideDelayMs;
+  uiHideDelayLabel.textContent = `Auto-reveal ${(uiHideDelayMs / 1000).toFixed(1)}s`;
+}
+
+uiHideDelayInput.addEventListener("input", () => {
+  uiHideDelayMs = parseFloat(uiHideDelayInput.value);
+  try { localStorage.setItem("uiHideDelayMs", String(uiHideDelayMs)); } catch {}
+  syncDisplayPanel();
+});
 
 seekBar.addEventListener("input", (event) => {
   const progress = Number.parseFloat(event.currentTarget.value) / 1000;
