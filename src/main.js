@@ -1425,6 +1425,21 @@ btnHideUi.addEventListener("click", () => {
   btnHideUi.setAttribute("aria-label", hidden ? "Show UI" : "Hide UI");
 });
 
+// While ui-hidden is set, any pointer movement or tap "peeks" the UI back in
+// for uiHideDelayMs, then it fades out again if the pointer stays idle.
+let uiHideDelayMs = loadNum("uiHideDelayMs", 2500, 1000, 8000);
+let uiPeekTimer = null;
+function peekUi() {
+  if (!document.body.classList.contains("ui-hidden")) return;
+  document.body.classList.add("ui-peek");
+  clearTimeout(uiPeekTimer);
+  uiPeekTimer = setTimeout(() => {
+    document.body.classList.remove("ui-peek");
+  }, uiHideDelayMs);
+}
+document.addEventListener("pointermove", peekUi);
+document.addEventListener("touchstart", peekUi, { passive: true });
+
 seekBar.addEventListener("input", (event) => {
   const progress = Number.parseFloat(event.currentTarget.value) / 1000;
   // Bridge track → seek the system player via MPRIS/SMTC; otherwise seek the
