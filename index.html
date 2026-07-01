@@ -491,6 +491,17 @@
       transform: translateX(-50%) translateY(0);
     }
 
+    /* Capture panel gets its own resize + bounds (settings-panel launcher,
+       the other .linebed-panel user, stays fixed-size — it's just tabs). */
+    .capture-panel {
+      resize: both;
+      overflow: hidden;
+      min-width: 220px;
+      min-height: 120px;
+      max-width: min(480px, 92vw);
+      max-height: min(82vh, 640px);
+    }
+
     .lb-title {
       font-size: 11px;
       font-family: 'Space Mono', monospace;
@@ -763,7 +774,11 @@
     .settings-window {
       position: fixed;
       width: min(300px, calc(100vw - 32px));
-      max-height: 82vh;
+      max-height: min(82vh, 640px);
+      min-width: 220px;
+      min-height: 160px;
+      max-width: min(480px, 92vw);
+      resize: both;
       display: flex;
       flex-direction: column;
       overflow: hidden;
