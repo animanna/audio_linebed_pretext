@@ -44,6 +44,17 @@ syncs with whatever is playing on the whole system:
 - **Linebed visualizer** — a scrolling, fake-3D chromatic spectrum stack with
   Smooth / Dynamic / Custom presets, alongside the classic Bars + Wave mode. See
   [Visualizers](#visualizers).
+- **Lyric typography** — themed and mood display faces (Western, Cyberpunk, Neon,
+  Retro, Vintage, Girly, Anime, Mystical, Horror, Metal, Excited, Calm, plus a
+  COLRv1 color font), and a **custom Google Fonts import** (type a name or paste a
+  fonts.google.com link). See [Lyric typography & motion](#lyric-typography--motion).
+- **Per-line motion controls** — entrance effects, per-beat reactions, a sync
+  **Warp** that re-paces the word-by-word reveal inside a line, and beat-driven
+  size / spacing — all without ever re-wrapping the line. See
+  [Lyric typography & motion](#lyric-typography--motion).
+- **Movable settings** — the gear opens a draggable launcher; each section
+  (Lyrics / Audio / Linebed) opens as its own draggable, independently
+  positioned popover. See [Controls](#controls).
 
 ## Why Pretext Is Here
 
@@ -145,6 +156,10 @@ Compared with the earlier implementation, the renderer now has:
 - balanced multiline width search
 - shaped line routing via per-line width changes
 - locale-aware cache resets when lyric language changes
+- **locked line breaks** — layout runs at a frozen font size, so line breaking is
+  a pure function of `(text, size, maxWidth)` and stays identical every frame. The
+  beat "pump" is applied afterward as a visual scale only, so loud passages can no
+  longer re-wrap a line and make words jump between rows (the old jitter)
 
 This makes the lyric block more robust for:
 
@@ -250,15 +265,21 @@ playing outside the app. Sources:
 
 The transport is a row of icon buttons (hover for tooltips):
 
-- **Visualizer** — switch between Linebed (default) and Bars + Wave
-- **Linebed presets** — Smooth / Dynamic / Custom (amplitude, contrast, velocity,
-  gate, flip-Y sliders); see [Visualizers](#visualizers)
+- **Settings (gear)** — opens a small draggable launcher with **Lyrics**,
+  **Audio**, and **Linebed** toggles. Each one opens as its own draggable popover
+  window, so several can stay open at once without overflowing the screen; the
+  gear hides/shows them together, and each window remembers where you put it. The
+  visualizer mode switch (Linebed / Bars + Wave) and its presets live inside the
+  **Linebed** window.
 - **Play / Pause** and the **seek bar** scrub the track
 - **Load** — pick audio and/or `.lrc` / `.txt` lyric files
 - **Capture** — open the [system audio capture](#system-audio-capture) menu
 - **Minimize** — collapse the player to free the screen
 
 You can also **drag-and-drop** audio or lyric files anywhere on the window.
+
+Every slider marks its factory default with a small dot beside its label —
+**click the label** (Motion, Offset, Gain, …) to snap it back.
 
 Supported lyric inputs:
 
@@ -278,6 +299,39 @@ Two modes, toggled with the Visualizer button:
   punch, noise gate, and Y-flip). The active preset persists in `localStorage`.
 - **Bars + Wave** — classic frequency bars plus a waveform trace.
 
+## Lyric typography & motion
+
+The **Lyrics** settings window controls how the lyric block looks and reacts.
+All settings persist in `localStorage`.
+
+**Fonts.** Beyond the basics (Sans / Serif / Cursive / Mono) there are themed and
+mood display faces — Western, Cyberpunk, Neon, Retro, Vintage, Girly, Anime,
+Mystical, Horror, Metal, Excited, Calm — plus a COLRv1 **color font** whose glyphs
+paint their own gradient. Most are Latin-only; non-Latin lyrics fall back to a
+system face.
+
+**Custom Google Fonts.** Type a family name (e.g. `Molle`) or paste either a
+`fonts.googleapis.com` CSS link or a `fonts.google.com/specimen/<Name>` page link,
+then hit Enter. The font is fetched, registered, selected, and remembered. The
+importer reads the loaded `@font-face` to pick up the real style and weight, so
+single-weight and **italic-only** faces render correctly instead of silently
+falling back. Imports are host-locked to Google Fonts.
+
+**Motion.** Independent of the entrance/beat effects:
+
+- **Effect** — entrance animation (word wave, reveal, fade, rise, zoom, cascade).
+- **Beat** — per-beat reaction (split, pump, shake, bounce, swing, jelly, flash).
+- **Motion** — global multiplier (0% = still text, for readability/accessibility).
+- **Size / Offset** — font scale and a lyric-sync time nudge.
+- **Warp** — re-paces the **word-by-word** reveal inside each line. LRCLIB only
+  timestamps whole lines; Warp gamma-biases the within-line progress so the reveal
+  can run ahead of (squish) or behind (expand) the line clock when vocals rush or
+  drag. Layout is untouched, so it never causes re-wrapping.
+
+On every beat the lines also breathe apart vertically and words open up
+horizontally — a compressed, capped spread so it reacts without blowing the text
+past the margins or shifting any line break.
+
 ## Screenshots
 
 The screenshots below were captured from a real local run of the app, using a local audio upload so the visuals reflect the actual audio + lyric pipeline rather than a mocked frame.
@@ -295,7 +349,7 @@ If generated successfully, the walkthrough video is stored here:
 
 ## File Map
 
-- `src/main.js`: main render loop, UI wiring, Pretext integration, lyric drawing, visualizers, capture menu
+- `src/main.js`: main render loop, UI wiring, Pretext integration, lyric drawing + typography (themed/custom fonts, motion, Warp), visualizers, capture menu, draggable settings windows
 - `src/audio.js`: audio loading, playback, analyser metrics, live capture (tab / device / bridge PCM stream)
 - `src/beat-detect.js`: beat and motion-state extraction
 - `src/lrc-parser.js`: LRC/plain-text lyric parsing
