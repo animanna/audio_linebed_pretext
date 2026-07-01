@@ -375,6 +375,51 @@ function readPos(key) {
   return null;
 }
 
+function readSize(key) {
+  try {
+    const s = JSON.parse(localStorage.getItem(key));
+    // Reject degenerate sizes (e.g. captured while the element was hidden/
+    // display:none, which reports a 0x0 content rect) so a stale save can't
+    // pin the element's specified width/height at 0 under the CSS min-*
+    // floor — that leaves the native resize handle needing to "catch up"
+    // past the floor before any visible movement appears.
+    if (s && Number.isFinite(s.w) && Number.isFinite(s.h) && s.w > 0 && s.h > 0) return s;
+  } catch {}
+  return null;
+}
+
+// Apply a previously-saved resize before the element is measured/positioned.
+function applySavedSize(el, key) {
+  const size = readSize(key);
+  if (size) {
+    el.style.width = `${size.w}px`;
+    el.style.height = `${size.h}px`;
+  }
+}
+
+// Persist size changes made via the native CSS `resize` handle, debounced.
+function watchSize(el, key) {
+  let saveTimer = null;
+  const observer = new ResizeObserver(() => {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      // Skip saves while hidden (display:none elements report an empty
+      // content rect) — otherwise this poisons the saved size to 0x0 on
+      // every page load, before the user ever resizes anything.
+      if (el.hidden) return;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) return;
+      try {
+        localStorage.setItem(
+          key,
+          JSON.stringify({ w: Math.round(r.width), h: Math.round(r.height) }),
+        );
+      } catch {}
+    }, 300);
+  });
+  observer.observe(el);
+}
+
 // Make `panel` draggable by `handle`, remembering where it's dropped.
 function makeDraggable(panel, handle, key) {
   if (!panel || !handle) return;
@@ -408,6 +453,7 @@ function makeDraggable(panel, handle, key) {
 function placeWindow(name) {
   const el = settingsWindows.get(name);
   if (!el) return;
+  applySavedSize(el, `settingsWinSize:${name}`);
   const saved = readPos(`settingsWinPos:${name}`);
   const idx = PANE_NAMES.indexOf(name);
   const w = el.offsetWidth || 300;
@@ -492,9 +538,11 @@ makeDraggable(settingsPanel, settingsHandle, "settingsPanelPos");
 settingsWindows.forEach((el, name) => {
   el.addEventListener("click", (e) => e.stopPropagation());
   makeDraggable(el, el.querySelector(".win-head"), `settingsWinPos:${name}`);
+  watchSize(el, `settingsWinSize:${name}`);
   const closeBtn = el.querySelector(".win-close");
   if (closeBtn) closeBtn.addEventListener("click", () => togglePane(name));
 });
+watchSize(capturePanel, "capturePanelSize");
 
 vizModeBtns.forEach((b) => {
   b.addEventListener("click", () => {
@@ -1712,6 +1760,7 @@ function makeCaptureItem({ title, sub, system, onClick }) {
 async function openCapturePanel() {
   capList.replaceChildren();
   capHint.textContent = "";
+  applySavedSize(capturePanel, "capturePanelSize");
   capturePanel.hidden = false;
   btnCapture.setAttribute("aria-expanded", "true");
 
