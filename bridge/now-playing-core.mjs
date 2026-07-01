@@ -29,6 +29,8 @@ function run(cmd, args, timeoutMs = 1500) {
 
 async function readLinux() {
   // Tab-delimited single read. Tabs in track text are vanishingly rare.
+  // xesam:asText (embedded lyrics) is LAST so any internal newlines stay in the
+  // final field after the TAB split.
   const FMT = [
     "{{playerName}}",
     "{{status}}",
@@ -36,17 +38,19 @@ async function readLinux() {
     "{{xesam:artist}}",
     "{{xesam:album}}",
     "{{mpris:length}}",
+    "{{xesam:asText}}",
   ].join(TAB);
   const meta = await run("playerctl", ["metadata", "--format", FMT]);
   if (!meta) return null;
-  const [player, status, title, artist, album, lengthUs] = meta
+  const [player, status, title, artist, album, lengthUs, ...rest] = meta
     .replace(/\n$/, "")
     .split(TAB);
   if (!title && !artist) return null;
+  const lyrics = rest.join(TAB).trim(); // embedded lyrics, "" when absent
   const posStr = await run("playerctl", ["position"]);
   const length = lengthUs ? Number(lengthUs) / 1e6 : 0; // µs → s
   const position = posStr ? Number(posStr.trim()) : 0;
-  return { player, status, title, artist, album, length, position };
+  return { player, status, title, artist, album, length, position, lyrics };
 }
 
 async function readMac() {
@@ -320,6 +324,59 @@ export async function controlPlayback(action) {
   return false;
 }
 
+// ── Absolute seek ──────────────────────────────────────────────────────────
+// Jump the OS media session to `seconds` (absolute position from the start).
+// `seconds` is coerced to a finite, non-negative number before it reaches any
+// command, and run() uses execFile (no shell), so nothing user-supplied can
+// inject. Returns true on success.
+
+async function seekLinux(seconds) {
+  // playerctl position <s> sets the absolute position (player must implement
+  // the MPRIS SetPosition method — most do).
+  return (await run("playerctl", ["position", String(seconds)])) !== null;
+}
+
+async function seekMac(seconds) {
+  // Best-effort: nowplaying-cli's seek support varies by version/app, so this
+  // may be a no-op on some macOS setups.
+  return (await run("nowplaying-cli", ["seek", String(seconds)])) !== null;
+}
+
+function seekPsScript(ticks) {
+  // SMTC position is in 100-ns ticks. TryChangePlaybackPositionAsync(Int64)
+  // returns IAsyncOperation<bool>.
+  return [
+    "$ErrorActionPreference = 'Stop'",
+    "[Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager,Windows.Media.Control,ContentType=WindowsRuntime] > $null",
+    "Add-Type -AssemblyName System.Runtime.WindowsRuntime",
+    "$asTask = ([System.WindowsRuntimeSystemExtensions].GetMethods() | Where-Object { $_.Name -eq 'AsTask' -and $_.GetParameters().Count -eq 1 -and $_.GetParameters()[0].ParameterType.Name -eq 'IAsyncOperation`1' })[0]",
+    "function Await($op, $t) { $m = $asTask.MakeGenericMethod($t); $task = $m.Invoke($null, @($op)); $task.Wait(); $task.Result }",
+    "$mgr = Await ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager]::RequestAsync()) ([Windows.Media.Control.GlobalSystemMediaTransportControlsSessionManager])",
+    "$s = $mgr.GetCurrentSession()",
+    "if ($null -eq $s) { exit 1 }",
+    `Await ($s.TryChangePlaybackPositionAsync([int64]${ticks})) ([bool]) > $null`,
+  ].join("\n");
+}
+
+async function seekWindows(seconds) {
+  const ticks = Math.round(seconds * 1e7);
+  const out = await run(
+    "powershell",
+    ["-NoProfile", "-NonInteractive", "-Command", seekPsScript(ticks)],
+    3000,
+  );
+  return out !== null;
+}
+
+export async function seekPlayback(seconds) {
+  const s = Number(seconds);
+  if (!Number.isFinite(s) || s < 0) return false;
+  if (OS === "linux") return seekLinux(s);
+  if (OS === "darwin") return seekMac(s);
+  if (OS === "win32") return seekWindows(s);
+  return false;
+}
+
 // Handle the /api/* routes. Returns true if the request was handled (so the
 // caller can stop), false to let static serving / next middleware take over.
 export async function handleApi(req, res, url) {
@@ -348,6 +405,16 @@ export async function handleApi(req, res, url) {
     const ok = allowed.includes(action)
       ? await controlPlayback(action)
       : false;
+    res.writeHead(200, {
+      "content-type": "application/json; charset=utf-8",
+      "cache-control": "no-store",
+      "access-control-allow-origin": "*",
+    });
+    res.end(JSON.stringify({ ok }));
+    return true;
+  }
+  if (url.pathname === "/api/seek") {
+    const ok = await seekPlayback(url.searchParams.get("position"));
     res.writeHead(200, {
       "content-type": "application/json; charset=utf-8",
       "cache-control": "no-store",

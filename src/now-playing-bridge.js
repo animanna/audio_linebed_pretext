@@ -47,6 +47,26 @@ export class NowPlayingBridge {
     return true;
   }
 
+  // Seek the system player to an absolute position (seconds). Optimistically
+  // updates the local position so the UI doesn't snap back to the old spot
+  // before the next poll catches up.
+  async seek(seconds) {
+    const s = Math.max(0, Number(seconds) || 0);
+    if (this.track) {
+      this.track.position = s;
+      this.polledAt = performance.now();
+    }
+    try {
+      await fetch(`/api/seek?position=${encodeURIComponent(s)}`, {
+        method: "POST",
+      });
+    } catch {
+      return false;
+    }
+    await this._poll();
+    return true;
+  }
+
   // Returns playback position in seconds, extrapolated since the last poll
   // while playing — or null when no track is known.
   getTime() {
