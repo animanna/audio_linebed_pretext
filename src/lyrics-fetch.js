@@ -7,6 +7,24 @@ import { parseLRC, parsePlainLyrics } from './lrc-parser.js'
  * Search for lyrics by track name and artist
  * Returns { lyrics: [...], source: string } or null
  */
+// Hard cap per request. lrclib's /api/search has been seen to hang for ~60s
+// (504), so without this the lyrics status freezes on "fetching…" indefinitely.
+const FETCH_TIMEOUT_MS = 8000
+
+async function fetchJson(url) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
+  try {
+    const res = await fetch(url, { signal: controller.signal })
+    if (!res.ok) return null
+    return await res.json()
+  } catch {
+    return null // timeout, abort, network, or non-JSON
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export async function fetchLyrics(trackInfo, artistName, audioDuration) {
   const query = typeof trackInfo === 'string'
     ? { title: trackInfo, artist: artistName, audioDuration }
@@ -16,8 +34,15 @@ export async function fetchLyrics(trackInfo, artistName, audioDuration) {
   if (candidates.length === 0) return null
 
   try {
-    let bestMatch = null
+    // Fast path first: the exact-match /api/get endpoint is reliable and quick,
+    // whereas /api/search is the slow/flaky one. Try get for every candidate
+    // before falling back to a scored search.
+    for (const candidate of candidates) {
+      const direct = await getLrclib(candidate.trackName, candidate.artistName, query.audioDuration)
+      if (direct) return direct
+    }
 
+    let bestMatch = null
     for (const candidate of candidates) {
       const results = await searchLrclib(candidate.trackName, candidate.artistName)
       if (!results || results.length === 0) continue
@@ -28,20 +53,12 @@ export async function fetchLyrics(trackInfo, artistName, audioDuration) {
           bestMatch = { result, score }
         }
       }
-
     }
 
     if (bestMatch && bestMatch.score >= 70) {
       const payload = buildLyricsPayload(bestMatch.result, query.audioDuration)
       if (payload) return payload
     }
-
-    // Try direct get endpoint if search failed
-    for (const candidate of candidates) {
-      const direct = await getLrclib(candidate.trackName, candidate.artistName, query.audioDuration)
-      if (direct) return direct
-    }
-
   } catch (err) {
     console.warn('Lyrics fetch failed:', err)
   }
@@ -52,31 +69,27 @@ export async function fetchLyrics(trackInfo, artistName, audioDuration) {
 async function searchLrclib(trackName, artistName) {
   const params = new URLSearchParams({ track_name: trackName })
   if (artistName) params.set('artist_name', artistName)
-
-  const res = await fetch(`https://lrclib.net/api/search?${params}`, {
-    headers: { 'User-Agent': 'MusicVizPretext/1.0' },
-  })
-
-  if (!res.ok) return null
-  return res.json()
+  return fetchJson(`https://lrclib.net/api/search?${params}`)
 }
 
 async function getLrclib(trackName, artistName, audioDuration) {
-  const params = new URLSearchParams({ track_name: trackName })
-  if (artistName) params.set('artist_name', artistName)
+  const base = new URLSearchParams({ track_name: trackName })
+  if (artistName) base.set('artist_name', artistName)
 
-  // Also try with duration for more precise matching
+  // Duration sharpens the match, but /api/get 404s when it doesn't line up, so
+  // fall back to a duration-less lookup.
   if (audioDuration) {
-    params.set('duration', Math.round(audioDuration).toString())
+    const withDur = new URLSearchParams(base)
+    withDur.set('duration', Math.round(audioDuration).toString())
+    const exact = await fetchJson(`https://lrclib.net/api/get?${withDur}`)
+    if (exact) {
+      const payload = buildLyricsPayload(exact, audioDuration)
+      if (payload) return payload
+    }
   }
 
-  const res = await fetch(`https://lrclib.net/api/get?${params}`, {
-    headers: { 'User-Agent': 'MusicVizPretext/1.0' },
-  })
-
-  if (!res.ok) return null
-  const data = await res.json()
-
+  const data = await fetchJson(`https://lrclib.net/api/get?${base}`)
+  if (!data) return null
   return buildLyricsPayload(data, audioDuration)
 }
 
