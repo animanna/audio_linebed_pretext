@@ -4138,6 +4138,45 @@ function bridgeLabel(track) {
   return track.artist ? `${track.artist} — ${track.title}` : track.title;
 }
 
+// Auto-capture "System output (bridge)" the moment the bridge reports it can
+// stream, so the monitor visualizes without a manual pick. Opt-out via
+// localStorage "bridgeAutoStart"="0". A fresh page has a suspended AudioContext
+// (autoplay policy) — awaiting resume() before any gesture can hang, so we only
+// fire once the context is already running, else arm the first user gesture.
+let bridgeAutoStart = localStorage.getItem("bridgeAutoStart") !== "0";
+let bridgeAutoDone = false; // capture attempted — never retry
+let bridgeAutoArmed = false; // gesture listeners attached — don't re-add
+
+async function tryBridgeAutoStart() {
+  if (bridgeAutoDone) return;
+  if (!bridgeAutoStart || !bridge.active || !bridge.audioStream) return;
+  if (audio.captureMode) {
+    bridgeAutoDone = true; // already capturing something — leave it alone
+    return;
+  }
+  bridgeAutoDone = true; // one shot; on failure the user can pick manually
+  await startCaptureSource(() => audio.startBridgeStream());
+}
+
+function scheduleBridgeAutoStart() {
+  if (bridgeAutoDone || bridgeAutoArmed) return;
+  if (!bridgeAutoStart || !bridge.active || !bridge.audioStream) return;
+  // Context already running (user interacted) → capture immediately.
+  if (audio.ctx && audio.ctx.state === "running") {
+    tryBridgeAutoStart();
+    return;
+  }
+  // Otherwise wait for the first gesture so AudioContext.resume() can succeed.
+  bridgeAutoArmed = true;
+  const fire = () => {
+    window.removeEventListener("pointerdown", fire);
+    window.removeEventListener("keydown", fire);
+    tryBridgeAutoStart();
+  };
+  window.addEventListener("pointerdown", fire);
+  window.addEventListener("keydown", fire);
+}
+
 function initBridge() {
   bridge.onTrack = (track) => {
     if (!track.title) return;
@@ -4192,11 +4231,15 @@ function initBridge() {
   };
   // Every poll: refresh the transport buttons so they track the system
   // player's status even when it's play/paused outside the app.
-  bridge.onUpdate = () => syncPlaybackControls();
+  bridge.onUpdate = () => {
+    syncPlaybackControls();
+    scheduleBridgeAutoStart(); // audioStream capability may flip true post-start
+  };
   bridge.start().then((reachable) => {
     if (reachable && !bridge.track) {
       updateLyricsStatus("Bridge connected · waiting for a track…");
     }
+    scheduleBridgeAutoStart();
   });
 }
 
