@@ -1014,6 +1014,13 @@
       .lyric-row.active { transform: none !important; }
     }
   </style>
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <meta name="theme-color" content="#0a0a0f" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <link rel="icon" type="image/png" href="/icon-192.png" />
 </head>
 <body>
   <canvas id="viz-canvas"></canvas>
@@ -1460,5 +1467,15 @@
   </div>
 
   <script type="module" src="/src/main.js"></script>
+  <script type="module">
+    // Register the service worker only in built output (vite preview / prod),
+    // never in `npm run dev` — a caching SW would fight HMR. import.meta.env.PROD
+    // is inlined by Vite at build time.
+    if (import.meta.env.PROD && "serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/sw.js").catch(() => {})
+      })
+    }
+  </script>
 </body>
 </html>
