@@ -961,7 +961,7 @@ function loadCustomFonts() {
 }
 
 loadCustomFonts(); // restore before lyricFontKey is read below
-const LYRIC_EFFECTS = ["wordwave", "reveal", "fade", "rise", "zoom", "cascade"];
+const LYRIC_EFFECTS = ["wordwave", "reveal", "fade", "rise", "zoom", "cascade", "gradient"];
 // How the text reacts on each detected beat (independent of the entrance effect).
 const BEAT_EFFECTS = ["split", "pump", "shake", "bounce", "swing", "jelly", "flash"];
 
@@ -1320,6 +1320,19 @@ let vsBandHighHz = loadNum("vsBandHighHz", VOCALSYNC_DEFAULTS.bandHighHz, 2500, 
 let vsPopIntensity = loadNum("vsPopIntensity", VOCALSYNC_DEFAULTS.popIntensity, 0, 2);
 let vsPopDecayMs = loadNum("vsPopDecayMs", VOCALSYNC_DEFAULTS.popDecayMs, 200, 1000);
 let vsGlitch = loadNum("vsGlitch", VOCALSYNC_DEFAULTS.glitch, 0, 1);
+// Selectable vocal-sync colour effects (Glitch/Pop are gated by their amount
+// sliders above; these two colour layers get explicit on/off switches).
+let vsFxGradient = localStorage.getItem("vsFxGradient") !== "0"; // default on
+let vsFxNeon = localStorage.getItem("vsFxNeon") !== "0"; // default on
+// On-viz active-word indicators (applied to the currently-sung word in mono
+// on-canvas lyrics — see drawLyrics). Each an independent Display-tab switch.
+let awGradient = localStorage.getItem("awGradient") !== "0"; // default on
+let awGlow = localStorage.getItem("awGlow") !== "0"; // default on
+let awPop = localStorage.getItem("awPop") !== "0"; // default on
+let awTint = localStorage.getItem("awTint") === "1"; // default off
+// Scope: colour only the running (currently-sung) word, or the whole revealed
+// line. Default = whole line (current behaviour).
+let vsRunningWordOnly = localStorage.getItem("vsRunningWordOnly") !== "0";
 
 function applyVocalSyncParams() {
   vocalDetector.thresholdMult = vsThreshold;
@@ -1350,6 +1363,9 @@ const vsDecayInput = document.getElementById("vs-decay");
 const vsDecayLabel = document.getElementById("vs-decay-label");
 const vsGlitchInput = document.getElementById("vs-glitch");
 const vsGlitchLabel = document.getElementById("vs-glitch-label");
+const vsFxGradientBtn = document.getElementById("vs-fx-gradient");
+const vsFxNeonBtn = document.getElementById("vs-fx-neon");
+const vsRunWordBtn = document.getElementById("vs-runword");
 
 function syncVocalSyncPanel() {
   if (!vsThreshInput) return;
@@ -1373,6 +1389,20 @@ function syncVocalSyncPanel() {
   vsDecayLabel.textContent = `Pop decay ${Math.round(vsPopDecayMs)} ms`;
   vsGlitchInput.value = vsGlitch;
   vsGlitchLabel.textContent = `Glitch amount ${Math.round(vsGlitch * 100)}%`;
+  if (vsFxGradientBtn) {
+    vsFxGradientBtn.setAttribute("aria-checked", vsFxGradient ? "true" : "false");
+    vsFxGradientBtn.textContent = vsFxGradient ? "Gradient on" : "Gradient off";
+  }
+  if (vsFxNeonBtn) {
+    vsFxNeonBtn.setAttribute("aria-checked", vsFxNeon ? "true" : "false");
+    vsFxNeonBtn.textContent = vsFxNeon ? "Neon on" : "Neon off";
+  }
+  if (vsRunWordBtn) {
+    vsRunWordBtn.setAttribute("aria-checked", vsRunningWordOnly ? "true" : "false");
+    vsRunWordBtn.textContent = vsRunningWordOnly
+      ? "Running word only"
+      : "Whole revealed line";
+  }
 }
 
 function bindVsSlider(input, apply) {
@@ -1429,6 +1459,28 @@ bindVsSlider(vsGlitchInput, (v) => {
   try { localStorage.setItem("vsGlitch", String(v)); } catch {}
 });
 
+if (vsFxGradientBtn) {
+  vsFxGradientBtn.addEventListener("click", () => {
+    vsFxGradient = !vsFxGradient;
+    try { localStorage.setItem("vsFxGradient", vsFxGradient ? "1" : "0"); } catch {}
+    syncVocalSyncPanel();
+  });
+}
+if (vsFxNeonBtn) {
+  vsFxNeonBtn.addEventListener("click", () => {
+    vsFxNeon = !vsFxNeon;
+    try { localStorage.setItem("vsFxNeon", vsFxNeon ? "1" : "0"); } catch {}
+    syncVocalSyncPanel();
+  });
+}
+if (vsRunWordBtn) {
+  vsRunWordBtn.addEventListener("click", () => {
+    vsRunningWordOnly = !vsRunningWordOnly;
+    try { localStorage.setItem("vsRunningWordOnly", vsRunningWordOnly ? "1" : "0"); } catch {}
+    syncVocalSyncPanel();
+  });
+}
+
 const vsResetBtn = document.getElementById("vs-reset");
 if (vsResetBtn) {
   vsResetBtn.addEventListener("click", () => {
@@ -1442,10 +1494,14 @@ if (vsResetBtn) {
     vsPopIntensity = VOCALSYNC_DEFAULTS.popIntensity;
     vsPopDecayMs = VOCALSYNC_DEFAULTS.popDecayMs;
     vsGlitch = VOCALSYNC_DEFAULTS.glitch;
+    vsFxGradient = true;
+    vsFxNeon = true;
+    vsRunningWordOnly = true;
     try {
       for (const k of [
         "vsThreshold", "vsMinGapMs", "vsGate", "vsLead", "vsSmoothing",
         "vsBandLowHz", "vsBandHighHz", "vsPopIntensity", "vsPopDecayMs", "vsGlitch",
+        "vsFxGradient", "vsFxNeon", "vsRunningWordOnly",
       ]) localStorage.removeItem(k);
     } catch {}
     applyVocalSyncParams();
@@ -1477,6 +1533,30 @@ btnHideUi.addEventListener("click", () => {
 // While ui-hidden is set, any pointer movement or tap "peeks" the UI back in
 // for uiHideDelayMs, then it fades out again if the pointer stays idle.
 let uiHideDelayMs = loadNum("uiHideDelayMs", 2500, 1000, 8000);
+// Seek this many ms before a lyric line's timestamp when clicking it in the
+// full-lyrics modal, so the line's start isn't already gone by the time audio
+// catches up. Settable on the Display tab.
+let leadMs = loadNum("lyricSeekLeadMs", 500, 0, 2000);
+// Active-line motion mode inside the full-lyrics modal. "pertoken" is a
+// Phase-2 placeholder (disabled in the UI); only "pulse" is functional.
+let lyricModalMotion = "pulse";
+try {
+  const m = localStorage.getItem("lyricModalMotion");
+  if (m === "pulse" || m === "pertoken") lyricModalMotion = m;
+} catch {}
+// Lyrics presentation: "modal" (DOM overlay via the ≣ button) or an on-canvas
+// all-lyrics layout, either fit-to-screen or scrolling. Persisted.
+let lyricsView = "modal";
+try {
+  const v = localStorage.getItem("lyricsView");
+  if (v === "modal" || v === "onviz-fit" || v === "onviz-scroll") lyricsView = v;
+} catch {}
+// On-viz list visibility (toggled by the ≣ button in on-viz modes). Session-only.
+// Default off so we never autostart into the full-lyrics wall — only the active
+// line shows until the user reveals the rest with ≣.
+let onvizLyricsShown = false;
+// Eased vertical scroll offset for onviz-scroll mode.
+let onvizScrollY = 0;
 let uiPeekTimer = null;
 function peekUi() {
   if (!document.body.classList.contains("ui-hidden")) return;
@@ -1491,15 +1571,72 @@ document.addEventListener("touchstart", peekUi, { passive: true });
 
 const uiHideDelayInput = document.getElementById("ui-hide-delay");
 const uiHideDelayLabel = document.getElementById("ui-hide-delay-label");
+const seekLeadInput = document.getElementById("lyric-seek-lead");
+const seekLeadLabel = document.getElementById("lyric-seek-lead-label");
+const modalMotionSelect = document.getElementById("lyric-modal-motion");
+const lyricsViewSelect = document.getElementById("lyrics-view");
+const awGradientBtn = document.getElementById("aw-gradient");
+const awGlowBtn = document.getElementById("aw-glow");
+const awPopBtn = document.getElementById("aw-pop");
+const awTintBtn = document.getElementById("aw-tint");
 
 function syncDisplayPanel() {
   uiHideDelayInput.value = uiHideDelayMs;
   uiHideDelayLabel.textContent = `Auto-reveal ${(uiHideDelayMs / 1000).toFixed(1)}s`;
+  seekLeadInput.value = leadMs;
+  seekLeadLabel.textContent = `Seek lead ${leadMs} ms`;
+  modalMotionSelect.value = lyricModalMotion;
+  lyricsViewSelect.value = lyricsView;
+  awGradientBtn.setAttribute("aria-checked", awGradient ? "true" : "false");
+  awGradientBtn.textContent = awGradient ? "Gradient on" : "Gradient off";
+  awGlowBtn.setAttribute("aria-checked", awGlow ? "true" : "false");
+  awGlowBtn.textContent = awGlow ? "Glow on" : "Glow off";
+  awPopBtn.setAttribute("aria-checked", awPop ? "true" : "false");
+  awPopBtn.textContent = awPop ? "Pop on" : "Pop off";
+  awTintBtn.setAttribute("aria-checked", awTint ? "true" : "false");
+  awTintBtn.textContent = awTint ? "Tint on" : "Tint off";
 }
 
 uiHideDelayInput.addEventListener("input", () => {
   uiHideDelayMs = parseFloat(uiHideDelayInput.value);
   try { localStorage.setItem("uiHideDelayMs", String(uiHideDelayMs)); } catch {}
+  syncDisplayPanel();
+});
+
+seekLeadInput.addEventListener("input", () => {
+  leadMs = parseFloat(seekLeadInput.value);
+  try { localStorage.setItem("lyricSeekLeadMs", String(leadMs)); } catch {}
+  syncDisplayPanel();
+});
+
+modalMotionSelect.addEventListener("change", () => {
+  lyricModalMotion = modalMotionSelect.value;
+  try { localStorage.setItem("lyricModalMotion", String(lyricModalMotion)); } catch {}
+});
+
+lyricsViewSelect.addEventListener("change", () => {
+  lyricsView = lyricsViewSelect.value;
+  try { localStorage.setItem("lyricsView", String(lyricsView)); } catch {}
+});
+
+awGradientBtn.addEventListener("click", () => {
+  awGradient = !awGradient;
+  try { localStorage.setItem("awGradient", awGradient ? "1" : "0"); } catch {}
+  syncDisplayPanel();
+});
+awGlowBtn.addEventListener("click", () => {
+  awGlow = !awGlow;
+  try { localStorage.setItem("awGlow", awGlow ? "1" : "0"); } catch {}
+  syncDisplayPanel();
+});
+awPopBtn.addEventListener("click", () => {
+  awPop = !awPop;
+  try { localStorage.setItem("awPop", awPop ? "1" : "0"); } catch {}
+  syncDisplayPanel();
+});
+awTintBtn.addEventListener("click", () => {
+  awTint = !awTint;
+  try { localStorage.setItem("awTint", awTint ? "1" : "0"); } catch {}
   syncDisplayPanel();
 });
 
@@ -1515,6 +1652,123 @@ seekBar.addEventListener("input", (event) => {
   if (audio.duration <= 0) return;
   audio.seekTo(progress * audio.duration);
   syncProgressUI();
+});
+
+// ── Full lyrics modal ───────────────────────────────────────────────────
+// A plain DOM scroll list of every fetched line. Click a line to seek to
+// just before its start; the active line is tracked + pulsed each frame from
+// the render loop (see updateModalActiveLine), only while the modal is open.
+const lyricsModal = document.getElementById("lyrics-modal");
+const lyricsModalBody = document.getElementById("lyrics-modal-body");
+const btnLyricsList = document.getElementById("btn-lyrics-list");
+let lyricsModalOpen = false;
+let modalActiveIdx = -1;
+let modalActiveEl = null;
+
+function buildLyricsModalList() {
+  lyricsModalBody.innerHTML = "";
+  modalActiveIdx = -1;
+  modalActiveEl = null;
+  const hasText = lyrics.some((l) => l.text && l.text.trim());
+  if (!hasText) {
+    const empty = document.createElement("div");
+    empty.className = "lyrics-modal-empty";
+    empty.textContent = "No lyrics loaded";
+    lyricsModalBody.appendChild(empty);
+    return;
+  }
+  lyrics.forEach((line, idx) => {
+    if (!line.text || !line.text.trim()) return;
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "lyric-row";
+    row.dataset.idx = String(idx);
+    row.textContent = line.text;
+    lyricsModalBody.appendChild(row);
+  });
+}
+
+// Track the active line and, in "pulse" mode, drive a whole-line scale/brightness
+// pulse from the shared beat state. Called from render() while the modal is open.
+function updateModalActiveLine(metrics) {
+  const idx = getCurrentLyricIndex(lyrics, getLyricTime());
+  if (idx !== modalActiveIdx) {
+    if (modalActiveEl) {
+      modalActiveEl.classList.remove("active");
+      modalActiveEl.style.transform = "";
+      modalActiveEl.style.filter = "";
+    }
+    modalActiveIdx = idx;
+    modalActiveEl =
+      idx < 0
+        ? null
+        : lyricsModalBody.querySelector(`.lyric-row[data-idx="${idx}"]`);
+    if (modalActiveEl) {
+      modalActiveEl.classList.add("active");
+      modalActiveEl.scrollIntoView({ block: "center", behavior: "smooth" });
+    }
+  }
+  if (!modalActiveEl) return;
+  if (lyricModalMotion !== "pulse") return;
+  // Sharp transients (impact) drive scale; sustained energy drives brightness.
+  // Scaled by the global lyric-motion knob so the modal honors the same slider.
+  const punch = (beat.impact * 0.9 + beat.pressure * 0.5) * lyricMotion;
+  const scale = 1 + Math.min(punch, 1) * 0.06;
+  const bright = 1 + (metrics.overall * 0.4 + beat.impact * 0.4) * lyricMotion;
+  modalActiveEl.style.transform = `scale(${scale.toFixed(3)})`;
+  modalActiveEl.style.filter = `brightness(${bright.toFixed(3)})`;
+}
+
+function seekToLyricLine(idx) {
+  const line = lyrics[idx];
+  if (!line) return;
+  const target = Math.max(0, line.time - leadMs / 1000);
+  // Mirror the seek-bar split: bridge track → system player, else local buffer.
+  if (bridge.active && bridge.track && bridge.track.length > 0) {
+    bridge.seek(target).then(syncProgressUI);
+    syncProgressUI();
+    return;
+  }
+  if (audio.duration <= 0) return;
+  audio.seekTo(target);
+  syncProgressUI();
+}
+
+function onModalKeydown(event) {
+  if (event.key === "Escape") closeLyricsModal();
+}
+
+function openLyricsModal() {
+  buildLyricsModalList();
+  lyricsModal.hidden = false;
+  lyricsModalOpen = true;
+  document.addEventListener("keydown", onModalKeydown);
+}
+
+function closeLyricsModal() {
+  if (modalActiveEl) {
+    modalActiveEl.style.transform = "";
+    modalActiveEl.style.filter = "";
+  }
+  lyricsModal.hidden = true;
+  lyricsModalOpen = false;
+  document.removeEventListener("keydown", onModalKeydown);
+}
+
+btnLyricsList.addEventListener("click", () => {
+  if (lyricsView === "modal") {
+    openLyricsModal();
+    return;
+  }
+  onvizLyricsShown = !onvizLyricsShown;
+});
+lyricsModal.addEventListener("click", (event) => {
+  if (event.target.closest("[data-close-modal]")) closeLyricsModal();
+});
+lyricsModalBody.addEventListener("click", (event) => {
+  const row = event.target.closest(".lyric-row");
+  if (!row) return;
+  seekToLyricLine(Number.parseInt(row.dataset.idx, 10));
 });
 
 // ── Local file loading (drag-drop + file picker) ────────────────────────
@@ -2903,7 +3157,45 @@ function getContourSample({
   };
 }
 
-function drawLyrics(metrics, w, h, time) {
+// Shared active-line layout: font string + Pretext line breaking. Used by
+// drawLyrics (modal mode) and drawAllLyrics (on-viz) so both measure and paint
+// the active line identically. baseFontOverride pins an absolute base size
+// (on-viz passes a shrunk / spotlight size); null = the default modal size.
+function layoutLyricLine(text, emphasis, w, h, baseFontOverride = null) {
+  const fontDef = LYRIC_FONTS[lyricFontKey] || LYRIC_FONTS.sans;
+  const baseFontSize =
+    baseFontOverride != null
+      ? baseFontOverride
+      : Math.min(w, h) * 0.06 * lyricFontScale;
+  const emphasisScale = emphasis ? 1.2 : 1;
+  const fontSize = Math.round(baseFontSize * emphasisScale);
+  const weight = emphasis ? fontDef.emphasisWeight : fontDef.weight;
+  const styPrefix = fontDef.style ? fontDef.style + " " : "";
+  const font = `${styPrefix}${weight} ${fontSize}px ${fontDef.family}`;
+  const maxWidth = w * 0.66;
+  const lineHeight = fontSize * 1.5;
+  const prepared = getPrepared(text, font);
+  const { lines } = layoutActiveLyricLines(prepared, maxWidth, lineHeight);
+  return {
+    fontDef,
+    baseFontSize,
+    fontSize,
+    font,
+    maxWidth,
+    lineHeight,
+    prepared,
+    lines,
+    height: lines.length * lineHeight,
+  };
+}
+
+function drawLyrics(metrics, w, h, time, opts = {}) {
+  const {
+    anchorTopY = null,
+    baseFontOverride = null,
+    drawCrossfade = anchorTopY == null,
+    mono = false,
+  } = opts;
   const currentTime = getLyricTime();
   const lyric = getCurrentLyric(lyrics, currentTime);
   const progress = getLyricProgress(lyrics, currentTime);
@@ -2933,17 +3225,14 @@ function drawLyrics(metrics, w, h, time) {
   // re-wrap every frame and flip words between lines near a wrap boundary
   // (the jitter/seizure bug). The pump is reintroduced below as a purely visual
   // scale that never touches layout, so breaks stay locked for the whole line.
-  const fontDef = LYRIC_FONTS[lyricFontKey] || LYRIC_FONTS.sans;
-  const baseFontSize = Math.min(w, h) * 0.06 * lyricFontScale;
-  const emphasisScale = lyric.emphasis ? 1.2 : 1;
-  const fontSize = Math.round(baseFontSize * emphasisScale);
-  const weight = lyric.emphasis ? fontDef.emphasisWeight : fontDef.weight;
-  // Some custom faces are italic-only (e.g. Molle); fontDef.style carries that
-  // so the canvas request matches the loaded @font-face instead of falling back.
-  const styPrefix = fontDef.style ? fontDef.style + " " : "";
-  const font = `${styPrefix}${weight} ${fontSize}px ${fontDef.family}`;
-  const maxWidth = w * 0.66; // narrower wrap target → more side breathing room
-  const lineHeight = fontSize * 1.5; // taller lines so wrapped lines don't crowd
+  // Font + Pretext line breaking come from the shared layout helper so on-viz
+  // mode measures/paints the active line identically (see layoutLyricLine).
+  const L = layoutLyricLine(lyric.text, lyric.emphasis, w, h, baseFontOverride);
+  const baseFontSize = L.baseFontSize;
+  const fontSize = L.fontSize;
+  const font = L.font;
+  const maxWidth = L.maxWidth;
+  const lineHeight = L.lineHeight;
 
   // Beat pump as a COMPRESSED visual scale (applied as an outer ctx transform,
   // never to the layout size). "pump" leans into it; "split" keeps the original
@@ -2970,17 +3259,20 @@ function drawLyrics(metrics, w, h, time) {
   const lineSpreadBeat = spreadBeat * 0.16; // extra inter-line gap (× lineHeight)
   const wordGapBeat = spreadBeat * fontSize * 0.22; // extra px between words
 
-  // Use pretext for line layout
-  const prepared = getPrepared(lyric.text, font);
-  const { lines } = layoutActiveLyricLines(prepared, maxWidth, lineHeight);
+  // Layout from the shared helper (computed above).
+  const prepared = L.prepared;
+  const { lines } = L;
 
   const totalTextHeight = lines.length * lineHeight;
   const verticalBias =
     -beat.surge * 18 - beat.pressure * 10 + beat.release * 12;
-  const baseY = h / 2 - totalTextHeight / 2 + verticalBias;
+  const baseY =
+    anchorTopY != null
+      ? anchorTopY
+      : h / 2 - totalTextHeight / 2 + verticalBias;
 
   // Draw fading previous lyric (crossfade)
-  if (prevLyricFade.text && prevLyricFade.alpha > 0) {
+  if (drawCrossfade && prevLyricFade.text && prevLyricFade.alpha > 0) {
     prevLyricFade.alpha -= 0.04;
     prevLyricFade.y -= 1.5;
     const fadeFont = `400 ${Math.round(baseFontSize * 0.7)}px Inter`;
@@ -3028,6 +3320,7 @@ function drawLyrics(metrics, w, h, time) {
   const vocalSyncActive = vocalSyncMode && lyricsTimed && totalTokens > 0;
   const evenFront = warpLyricProgress(progress) * (totalTokens + 0.8);
   let vocalFront = 0;
+  let vocalFrontWord = -1; // global idx of the word currently emerging on screen
   if (vocalSyncActive) {
     const entryKey = lyric.time;
     if (entryKey !== vocalEntryKey) {
@@ -3052,15 +3345,6 @@ function drawLyrics(metrics, w, h, time) {
     vocalSeenOnsetId = vocalDetector.onsetId;
     if (vocalStarted && newOnsets > 0) {
       vocalRevealCursor = Math.min(totalTokens, vocalRevealCursor + newOnsets);
-      // Stamp the freshly-revealed word so it pops with this onset's energy.
-      const idx = Math.min(vocalRevealCursor - 1, totalTokens - 1);
-      if (idx >= 0) {
-        vocalPops.set(idx, {
-          t0: time,
-          strength: vocalDetector.onset,
-          band: vocalDetector.onsetBand,
-        });
-      }
     }
 
     const onsetFront = vocalRevealCursor * 0.92;
@@ -3076,7 +3360,30 @@ function drawLyrics(metrics, w, h, time) {
     const backload = Math.pow(Math.max(0, (progress - 0.5) / 0.5), 1.5);
     const netFront = backload * (totalTokens + 0.8);
     vocalFront = Math.max(capped, netFront);
+
+    // The word currently EMERGING on screen (front word). Drives both the pop
+    // stamp and the running-word colour scope.
+    vocalFrontWord = clamp(Math.floor(vocalFront / 0.92), 0, totalTokens - 1);
+
+    // Stamp the pop on that emerging word — not the onset cursor. The even-clock/
+    // backload fallback can push the visible reveal ahead of the cursor, so
+    // stamping the cursor word lands the burst on an already-settled early word
+    // (the "glitches the 2nd/3rd word after the line ends" symptom). The front
+    // word is the one the viewer sees appear, so the punch reads as on-beat.
+    if (vocalStarted && newOnsets > 0) {
+      vocalPops.set(vocalFrontWord, {
+        t0: time,
+        strength: vocalDetector.onset,
+        band: vocalDetector.onsetBand,
+      });
+    }
   }
+
+  // The word currently emerging: the vocal-onset front under Vocal Sync, else
+  // the even-clock reveal front. Drives the on-viz active-word effects.
+  const activeWordIdx = vocalSyncActive
+    ? vocalFrontWord
+    : clamp(Math.floor(evenFront / 0.92), 0, Math.max(0, totalTokens - 1));
 
   // Apply the compressed beat pump as a single uniform scale about the text
   // block centre. Because it wraps the whole render (and never the layout), the
@@ -3231,8 +3538,13 @@ function drawLyrics(metrics, w, h, time) {
           const env = Math.max(0, 1 - (time - pop.t0) / (vsPopDecayMs / 1000));
           if (env > 0) {
             const s = pop.strength * env * lyricMotion * vsPopIntensity;
-            const sharp = pop.band === "sibilance";
             const heavy = pop.band === "body";
+            // Per-band glitch factor: sibilants glitch hardest, but presence-band
+            // consonant attacks (the actual word starts) glitch strongly too, and
+            // even body-dominant slams keep a little RGB fray. Never zero, so
+            // every onset reads on screen.
+            const gb =
+              pop.band === "sibilance" ? 1 : pop.band === "presence" ? 0.72 : 0.32;
             const overshoot = springOut(1 - env); // ~1 at fire, eases out
             popScaleX += s * (heavy ? 0.5 : 0.32) * (0.4 + overshoot * 0.6);
             popScaleY += s * (heavy ? 0.55 : 0.3) * (0.4 + overshoot * 0.6);
@@ -3243,13 +3555,14 @@ function drawLyrics(metrics, w, h, time) {
               (0.12 + vocalDetector.level * 0.5);
             popScaleX += wob;
             popScaleY -= wob * 0.8;
-            // Glitch jitter: sharpest on sibilants.
-            const jitter = sharp ? s : s * 0.35;
-            popOffX += (Math.random() * 2 - 1) * jitter * (sharp ? 14 : 6);
-            popOffY += (Math.random() * 2 - 1) * jitter * (sharp ? 10 : 4);
+            // Glitch jitter scales with the band factor: sharp on sibilants,
+            // firm on consonant onsets, a nudge on heavy slams.
+            const jitter = s * (0.35 + gb * 0.65);
+            popOffX += (Math.random() * 2 - 1) * jitter * (6 + gb * 10);
+            popOffY += (Math.random() * 2 - 1) * jitter * (4 + gb * 8);
             popRot += (Math.random() * 2 - 1) * jitter * 0.12;
             popGlow += s * 18;
-            vocalGlitch = sharp ? env * pop.strength * vsGlitch : 0;
+            vocalGlitch = env * pop.strength * vsGlitch * gb;
           }
         }
       }
@@ -3257,6 +3570,7 @@ function drawLyrics(metrics, w, h, time) {
       return {
         ...token,
         wordIdx,
+        globalWordIdx,
         charFreq,
         energy: wordEnergy,
         phase,
@@ -3347,9 +3661,11 @@ function drawLyrics(metrics, w, h, time) {
         const colorIdx = (state.wordIdx + lineIdx * 2) % palette.length;
         const colorBase = palette[colorIdx];
         const colorNext = palette[(colorIdx + 1) % palette.length];
-        const charColor = lyric.emphasis
-          ? lerpColor(colorBase, colorNext, state.charFreq)
-          : `rgba(255, 255, 255, ${state.alpha * (0.82 + state.charFreq * 0.3)})`;
+        const charColor = mono
+          ? `rgba(255, 255, 255, ${state.alpha})`
+          : lyric.emphasis
+            ? lerpColor(colorBase, colorNext, state.charFreq)
+            : `rgba(255, 255, 255, ${state.alpha * (0.82 + state.charFreq * 0.3)})`;
 
         if (state.phase < 1) {
           ctx.save();
@@ -3368,20 +3684,93 @@ function drawLyrics(metrics, w, h, time) {
         ctx.save();
         ctx.translate(drawX, drawY + fontSize / 2);
         ctx.rotate(drawRotation);
+        const awPopBump =
+          mono && awPop && state.globalWordIdx === activeWordIdx
+            ? (beat.impact * 0.18 + state.vocalGlitch * 0.25) * lyricMotion
+            : 0;
         ctx.scale(
-          state.scaleX + bm.sx + (sp * 0.12 + state.energy * 0.05) * lyricMotion,
-          state.scaleY + bm.sy + (-sp * 0.04 + state.energy * 0.03) * lyricMotion,
+          state.scaleX + bm.sx + (sp * 0.12 + state.energy * 0.05) * lyricMotion + awPopBump,
+          state.scaleY + bm.sy + (-sp * 0.04 + state.energy * 0.03) * lyricMotion + awPopBump,
         );
         ctx.globalAlpha = state.alpha;
         ctx.font = font;
         ctx.textBaseline = "top";
-        ctx.shadowColor = lyric.emphasis ? colorBase : "rgba(255,255,255,0.52)";
+
+        // ── Vocal Sync colour layers ──
+        // Running-word scope: colour the whole revealed line, or only the word
+        // currently emerging on screen. The colour effects are individually
+        // selectable in the Vocal Sync popover (gradient / neon switches). The
+        // gradient can also run as a general Lyric Effect on every line.
+        const isRunningWord = state.globalWordIdx === vocalFrontWord;
+        // On-viz (mono): the single emerging word gets the active-word effects.
+        const isActiveWord = mono && state.globalWordIdx === activeWordIdx;
+        const vocalColorOn =
+          vocalSyncActive && (!vsRunningWordOnly || isRunningWord);
+        const gradientOn =
+          (!mono && ((vocalColorOn && vsFxGradient) || lyricEffect === "gradient")) ||
+          (isActiveWord && awGradient);
+        const neonOn = !mono && vocalColorOn && vsFxNeon;
+
+        // A running gradient sweeps hue across each word, scrolling over time and
+        // widening / brightening with the audio level and the word's pop energy —
+        // louder, freshly-onset words burn a wider, hotter rainbow; quiet held
+        // words drift a narrow tint.
+        let vocalFill = null;
+        let vocalHue = 0;
+        if (gradientOn || neonOn) {
+          vocalHue = (time * 55 + (state.wordIdx + lineIdx * 3) * 34) % 360;
+        }
+        if (gradientOn) {
+          // Under Vocal Sync the sweep breathes with the vocal stem + pop energy;
+          // as a general effect it breathes with the overall audio level.
+          const lvl = vocalColorOn ? vocalDetector.level : metrics.overall;
+          const pop = vocalColorOn ? state.vocalGlitch : 0;
+          const spread = 70 + lvl * 160 + pop * 120;
+          const sat = 80 + lvl * 20;
+          const light = 60 + pop * 26;
+          const grad = ctx.createLinearGradient(
+            -state.baseWidth / 2,
+            -fontSize / 2,
+            state.baseWidth / 2,
+            fontSize / 2,
+          );
+          for (let gi = 0; gi <= 4; gi++) {
+            const gt = gi / 4;
+            const h = (vocalHue + gt * spread) % 360;
+            grad.addColorStop(gt, `hsl(${h}, ${sat}%, ${light}%)`);
+          }
+          vocalFill = grad;
+        }
+
+        // Active-word solid tint (only when no gradient already fills it).
+        if (!vocalFill && isActiveWord && awTint) {
+          vocalFill = colorBase;
+        }
+
+        const awGlowOn = isActiveWord && awGlow;
+        ctx.shadowColor = awGlowOn
+          ? gradientOn
+            ? `hsl(${vocalHue}, 90%, 62%)`
+            : awTint
+              ? colorBase
+              : "rgba(255,255,255,0.9)"
+          : mono
+            ? "rgba(255,255,255,0.5)"
+            : gradientOn
+              ? `hsl(${vocalHue}, 90%, 62%)`
+              : lyric.emphasis
+                ? colorBase
+                : "rgba(255,255,255,0.52)";
         ctx.shadowBlur =
-          state.glow + state.charFreq * 18 + sp * 10 + bm.glow;
+          state.glow +
+          state.charFreq * 18 +
+          sp * 10 +
+          bm.glow +
+          (awGlowOn ? 14 + beat.impact * 22 + state.vocalGlitch * 20 : 0);
 
         // Vocal Sync glitch: RGB-split ghosts behind the crisp word on sibilant
         // onsets, settling as the pop decays.
-        if (state.vocalGlitch > 0.05) {
+        if (!mono && state.vocalGlitch > 0.05) {
           const gx = state.vocalGlitch * 6;
           ctx.save();
           ctx.globalCompositeOperation = "lighter";
@@ -3394,8 +3783,21 @@ function drawLyrics(metrics, w, h, time) {
           ctx.restore();
         }
 
-        ctx.fillStyle = charColor;
+        ctx.fillStyle = vocalFill || charColor;
         ctx.fillText(state.text, -state.baseWidth / 2, -fontSize / 2);
+
+        // Vocal Sync neon: a complementary-hue additive outline flares on hot
+        // onsets and fades with the pop, ringing the word in electric colour.
+        if (neonOn && state.vocalGlitch > 0.12) {
+          ctx.save();
+          ctx.globalCompositeOperation = "lighter";
+          ctx.globalAlpha = state.alpha * state.vocalGlitch * 0.7;
+          ctx.shadowBlur = 0;
+          ctx.lineWidth = 1 + state.vocalGlitch * 2;
+          ctx.strokeStyle = `hsl(${(vocalHue + 180) % 360}, 100%, 66%)`;
+          ctx.strokeText(state.text, -state.baseWidth / 2, -fontSize / 2);
+          ctx.restore();
+        }
 
         // Flash effect: additive white burst on the beat, so the word visibly
         // lights up rather than just gaining a soft glow.
@@ -3436,6 +3838,122 @@ function drawLyrics(metrics, w, h, time) {
   }
 
   ctx.restore(); // pop the beat-pump scale
+}
+
+// ── On-canvas all-lyrics renderer ──────────────────────────────────────
+// Base font as a fraction of the smaller viewport side; the active line is 15%
+// bigger for a spotlight. fit-all shrinks every line uniformly so the whole song
+// fits the height; scroll keeps a readable size and scrolls the block so the
+// active line rests around 45% of the screen.
+const ONVIZ_BASE_SCALE = 0.03;
+const ONVIZ_ACTIVE_MULT = 1.15;
+
+function drawAllLyrics(metrics, w, h, time, dt, showRest = true) {
+  const activeIdx = getCurrentLyricIndex(lyrics, getLyricTime());
+
+  // Button-toggled off: spotlight only the active line, centered, "fit the
+  // frame". Plain (mono) so it matches the rest-of-lyrics styling.
+  if (!showRest) {
+    drawLyrics(metrics, w, h, time, { mono: true, drawCrossfade: false });
+    return;
+  }
+
+  const items = [];
+  for (let i = 0; i < lyrics.length; i++) {
+    const text = lyrics[i].text;
+    if (text && text.trim()) {
+      items.push({
+        idx: i,
+        text,
+        emphasis: lyrics[i].emphasis,
+        active: i === activeIdx,
+      });
+    }
+  }
+  if (items.length === 0) return;
+
+  const topMargin = h * 0.08;
+  const usableH = h - topMargin * 2;
+  const gap = Math.min(w, h) * ONVIZ_BASE_SCALE * 0.6;
+  const baseSize = Math.min(w, h) * ONVIZ_BASE_SCALE;
+  const activeSize = baseSize * ONVIZ_ACTIVE_MULT;
+
+  const measure = (item, size) =>
+    layoutLyricLine(item.text, item.emphasis, w, h, size);
+  let laid = items.map((item) =>
+    measure(item, item.active ? activeSize : baseSize),
+  );
+  let total = laid.reduce((s, l) => s + l.height, 0) + gap * (items.length - 1);
+
+  // fit-all: shrink every line so the whole song fits the usable height. Smaller
+  // fonts wrap less, so the re-measured total only gets shorter → always fits.
+  let shrink = 1;
+  if (lyricsView === "onviz-fit" && total > usableH) {
+    shrink = usableH / total;
+    laid = items.map((item) =>
+      measure(item, (item.active ? activeSize : baseSize) * shrink),
+    );
+    total = laid.reduce((s, l) => s + l.height, 0) + gap * (items.length - 1);
+  }
+
+  // scroll: no shrink; ease the block so the active line sits at ~45% height.
+  let scroll = 0;
+  if (lyricsView === "onviz-scroll") {
+    // Find the visible active row; during empty-line gaps there is none, so we
+    // hold the current scroll instead of lurching to the bottom.
+    let activeTop = topMargin;
+    let hasActive = false;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].active) {
+        hasActive = true;
+        break;
+      }
+      activeTop += laid[i].height + gap;
+    }
+    if (activeIdx < 0) onvizScrollY = 0;
+    else if (hasActive) {
+      const target = activeTop - h * 0.45;
+      const k = Math.min(1, dt * 6);
+      onvizScrollY += (target - onvizScrollY) * k;
+    }
+    scroll = onvizScrollY;
+  }
+
+  let y = topMargin - scroll;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    const l = laid[i];
+    // Cull lines scrolled off-screen (relevant in scroll mode).
+    if (y + l.height < 0 || y > h) {
+      y += l.height + gap;
+      continue;
+    }
+    if (item.active) {
+      // Delegate to the shared active-line painter at this Y and size, so the
+      // active line keeps its full per-word beat motion / vocal-sync behavior.
+      drawLyrics(metrics, w, h, time, {
+        anchorTopY: y,
+        baseFontOverride: activeSize * shrink,
+        drawCrossfade: false,
+        mono: true,
+      });
+    } else {
+      // Plain white, no palette/gradient; nearer lines brighter for depth.
+      const dist = Math.abs(item.idx - activeIdx);
+      const alpha = clamp(0.8 - dist * 0.07, 0.32, 0.8);
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = l.font;
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "rgba(255, 255, 255, 0.96)";
+      for (let li = 0; li < l.lines.length; li++) {
+        const x = (w - l.lines[li].width) / 2;
+        ctx.fillText(l.lines[li].text, x, y + li * l.lineHeight);
+      }
+      ctx.restore();
+    }
+    y += l.height + gap;
+  }
 }
 
 // ── Context lyrics ─────────────────────────────────────────────────────
@@ -3565,12 +4083,18 @@ function render(timestamp) {
   // Draw lyrics when we have a timeline: file playback, or the bridge feeding
   // a system track position. Pure capture (no bridge) has no timeline → skip.
   if (!audio.captureMode || bridge.active) {
-    drawContextLyrics(metrics, w, h, fakeTime);
-    drawLyrics(metrics, w, h, fakeTime);
+    if (lyricsView === "modal") {
+      drawContextLyrics(metrics, w, h, fakeTime);
+      drawLyrics(metrics, w, h, fakeTime);
+    } else {
+      // Active line is always drawn; the ≣ button only toggles the rest.
+      drawAllLyrics(metrics, w, h, fakeTime, dt, onvizLyricsShown);
+    }
   }
   updateParticles();
   drawParticles();
   syncProgressUI();
+  if (lyricsModalOpen) updateModalActiveLine(metrics);
 
   animFrame = requestAnimationFrame(render);
 }

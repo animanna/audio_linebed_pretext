@@ -41,6 +41,16 @@ export function getCurrentLyric(lyrics, currentTime) {
   return current
 }
 
+// Same scan as getCurrentLyric, but returns the array index (-1 if the
+// timeline hasn't reached any line yet). The full-lyrics modal uses it to
+// mark the active row.
+export function getCurrentLyricIndex(lyrics, currentTime) {
+  for (let i = lyrics.length - 1; i >= 0; i--) {
+    if (currentTime >= lyrics[i].time) return i
+  }
+  return -1
+}
+
 // Utility: get progress within current lyric (0..1)
 export function getLyricProgress(lyrics, currentTime) {
   let idx = 0
