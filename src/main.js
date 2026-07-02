@@ -9,9 +9,9 @@ import {
 import { AudioEngine } from "./audio.js";
 import { BeatDetector } from "./beat-detect.js";
 import { VocalOnsetDetector } from "./vocal-sync.js";
-import { getCurrentLyric, getLyricProgress } from "./lyrics.js";
+import { getCurrentLyric, getLyricProgress, getCurrentLyricIndex } from "./lyrics.js";
 import { parseLyricsFile } from "./lrc-parser.js";
-import { fetchLyrics } from "./lyrics-fetch.js";
+import { fetchLyricsCached as fetchLyrics } from "./lyrics-store.js";
 import { readID3Tags } from "./id3-reader.js";
 import { NowPlayingBridge } from "./now-playing-bridge.js";
 import { serviceIcon, serviceLabel } from "./service-icons.js";
