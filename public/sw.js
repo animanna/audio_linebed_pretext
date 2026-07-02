@@ -7,7 +7,10 @@
 // Bump CACHE to invalidate everything on the next activate.
 
 const CACHE = "lyrebed-shell-v1";
-const CORE = ["/", "/index.html", "/manifest.webmanifest"];
+// Resolve everything relative to where the SW is served from, so the app
+// works at "/" (dev/preview) and under a subpath (GitHub Pages project site).
+const BASE = new URL("./", self.location).pathname;
+const CORE = [BASE, BASE + "index.html", BASE + "manifest.webmanifest"];
 
 self.addEventListener("install", (event) => {
   event.waitUntil(
@@ -35,14 +38,14 @@ self.addEventListener("fetch", (event) => {
 
   const url = new URL(request.url);
   if (url.origin !== self.location.origin) return; // lrclib / google fonts → network
-  if (url.pathname.startsWith("/api/")) return; // bridge endpoints → always live
+  if (url.pathname.startsWith(BASE + "api/")) return; // bridge endpoints → always live
 
   // App navigations: try network, fall back to the cached shell offline.
   if (request.mode === "navigate") {
     event.respondWith(
       fetch(request).catch(
         () =>
-          caches.match("/index.html").then((r) => r || caches.match("/")),
+          caches.match(BASE + "index.html").then((r) => r || caches.match(BASE)),
       ),
     );
     return;
